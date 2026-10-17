@@ -52,6 +52,8 @@ public:
     void setShowGrid(bool on);
     bool showGrid() const { return m_grid; }
     void setShowRulers(bool on);
+    void setTiled(bool on);
+    bool tiled() const { return m_tiled; }
     bool showRulers() const { return m_rulers; }
 
     void updateImageRect(const QRectF &imageRect);
@@ -96,6 +98,9 @@ private:
     QPoint m_panLast;
     bool m_toolDrag = false;
     void updateMip();
+    void drawTile(QPainter &p, const QRect &exposed, const QPointF &origin);
+    QPointF tileMargin() const;
+    bool m_tiled = false;
     QImage m_mip;                 // downscaled composite used when zoomed out below 50%
     int m_mipLevel = 0;
     QRect m_mipDirty;

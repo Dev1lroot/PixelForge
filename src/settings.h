@@ -39,6 +39,7 @@ public:
     int radius = 20;
     bool smoothResample = true;
     Units units = Units::Pixels;
+    bool tileMode = false;              // tile view: paint wraps across canvas edges
 
     void notify() { emit changed(); }
 

@@ -160,13 +160,19 @@ QVector<double> CanvasView::zoomPresets()
             2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 12.0, 16.0, 24.0, 36.0};
 }
 
+QPointF CanvasView::tileMargin() const
+{
+    return m_tiled ? QPointF(m_doc->width() * m_zoom, m_doc->height() * m_zoom) : QPointF(0, 0);
+}
+
 QPointF CanvasView::imageOrigin() const
 {
-    const double w = m_doc->width() * m_zoom, h = m_doc->height() * m_zoom;
+    const int n = m_tiled ? 3 : 1;
+    const double w = m_doc->width() * m_zoom * n, h = m_doc->height() * m_zoom * n;
     const QSize vp = viewport()->size();
     double x = w < vp.width() ? std::floor((vp.width() - w) / 2) : -horizontalScrollBar()->value();
     double y = h < vp.height() ? std::floor((vp.height() - h) / 2) : -verticalScrollBar()->value();
-    return QPointF(x, y);
+    return QPointF(x, y) + tileMargin();
 }
 
 QPointF CanvasView::viewToImage(const QPointF &v) const
@@ -194,8 +200,9 @@ QRectF CanvasView::visibleImageRect() const
 
 void CanvasView::updateScrollBars()
 {
-    const int w = int(std::ceil(m_doc->width() * m_zoom));
-    const int h = int(std::ceil(m_doc->height() * m_zoom));
+    const int n = m_tiled ? 3 : 1;
+    const int w = int(std::ceil(m_doc->width() * m_zoom * n));
+    const int h = int(std::ceil(m_doc->height() * m_zoom * n));
     const QSize vp = viewport()->size();
     horizontalScrollBar()->setRange(0, std::max(0, w - vp.width()));
     verticalScrollBar()->setRange(0, std::max(0, h - vp.height()));
@@ -214,8 +221,8 @@ void CanvasView::setZoom(double z, const QPointF &anchorIn)
     QPointF img = viewToImage(anchor);
     m_zoom = z;
     updateScrollBars();
-    horizontalScrollBar()->setValue(int(std::round(img.x() * z - anchor.x())));
-    verticalScrollBar()->setValue(int(std::round(img.y() * z - anchor.y())));
+    horizontalScrollBar()->setValue(int(std::round(img.x() * z + tileMargin().x() - anchor.x())));
+    verticalScrollBar()->setValue(int(std::round(img.y() * z + tileMargin().y() - anchor.y())));
     viewport()->update();
     m_hruler->update();
     m_vruler->update();
@@ -246,8 +253,8 @@ void CanvasView::zoomToWindow()
     QSize vp = viewport()->size();
     double z = std::min((vp.width() - 10.0) / m_doc->width(), (vp.height() - 10.0) / m_doc->height());
     setZoom(std::max(0.01, z));
-    horizontalScrollBar()->setValue(0);
-    verticalScrollBar()->setValue(0);
+    horizontalScrollBar()->setValue(horizontalScrollBar()->maximum() / 2);
+    verticalScrollBar()->setValue(verticalScrollBar()->maximum() / 2);
 }
 
 void CanvasView::actualSize()
@@ -265,8 +272,8 @@ void CanvasView::zoomToRect(const QRectF &r)
     m_zoom = z;
     updateScrollBars();
     QPointF c = r.center();
-    horizontalScrollBar()->setValue(int(c.x() * z - vp.width() / 2.0));
-    verticalScrollBar()->setValue(int(c.y() * z - vp.height() / 2.0));
+    horizontalScrollBar()->setValue(int(c.x() * z + tileMargin().x() - vp.width() / 2.0));
+    verticalScrollBar()->setValue(int(c.y() * z + tileMargin().y() - vp.height() / 2.0));
     viewport()->update();
     m_hruler->update();
     m_vruler->update();
@@ -277,6 +284,21 @@ void CanvasView::scrollBy(const QPointF &d)
 {
     horizontalScrollBar()->setValue(horizontalScrollBar()->value() + int(d.x()));
     verticalScrollBar()->setValue(verticalScrollBar()->value() + int(d.y()));
+}
+
+void CanvasView::setTiled(bool on)
+{
+    if (on == m_tiled)
+        return;
+    QPointF centre(viewport()->width() / 2.0, viewport()->height() / 2.0);
+    QPointF img = viewToImage(centre);
+    m_tiled = on;
+    updateScrollBars();
+    horizontalScrollBar()->setValue(int(std::round(img.x() * m_zoom + tileMargin().x() - centre.x())));
+    verticalScrollBar()->setValue(int(std::round(img.y() * m_zoom + tileMargin().y() - centre.y())));
+    viewport()->update();
+    m_hruler->update();
+    m_vruler->update();
 }
 
 void CanvasView::setShowGrid(bool on)
@@ -306,7 +328,17 @@ void CanvasView::layoutRulers()
 void CanvasView::updateImageRect(const QRectF &r)
 {
     QRectF v = imageToView(r).adjusted(-2, -2, 2, 2);
-    viewport()->update(v.toAlignedRect());
+    if (!m_tiled) {
+        viewport()->update(v.toAlignedRect());
+        return;
+    }
+    // the same pixels are shown on every copy in tile view
+    const double tw = m_doc->width() * m_zoom, th = m_doc->height() * m_zoom;
+    QRegion region;
+    for (int ty = -1; ty <= 1; ++ty)
+        for (int tx = -1; tx <= 1; ++tx)
+            region += v.translated(tx * tw, ty * th).toAlignedRect();
+    viewport()->update(region);
 }
 
 void CanvasView::resizeEvent(QResizeEvent *e)
@@ -325,6 +357,55 @@ void CanvasView::scrollContentsBy(int, int)
     }
 }
 
+void CanvasView::drawTile(QPainter &p, const QRect &exposed, const QPointF &o)
+{
+    const QRectF ir(o, QSizeF(m_doc->width() * m_zoom, m_doc->height() * m_zoom));
+    const QRect target = ir.toAlignedRect().intersected(exposed);
+    if (target.isEmpty())
+        return;
+    p.setBrushOrigin(o);
+    p.fillRect(target, QBrush(m_checker));
+    p.setBrushOrigin(0, 0);
+    auto toImg = [&](const QPointF &v) { return QPointF((v.x() - o.x()) / m_zoom, (v.y() - o.y()) / m_zoom); };
+    auto toView = [&](const QPointF &i) { return QPointF(o.x() + i.x() * m_zoom, o.y() + i.y() * m_zoom); };
+    const QPointF a = toImg(target.topLeft());
+    const QPointF b = toImg(QPointF(target.right() + 1, target.bottom() + 1));
+    p.save();
+    p.setClipRect(target);
+    if (m_zoom < 0.5) {
+        updateMip();
+        const double s = 1.0 / (1 << m_mipLevel);
+        QRectF src = QRectF(a * s, b * s).intersected(QRectF(m_mip.rect()));
+        QRectF dst(toView(src.topLeft() / s), toView(src.bottomRight() / s));
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p.drawImage(dst, m_mip, src);
+    } else {
+        // integer source rect covering the exposed area
+        QRect src(QPoint(int(std::floor(a.x())), int(std::floor(a.y()))),
+                  QPoint(int(std::ceil(b.x())) - 1, int(std::ceil(b.y())) - 1));
+        src = src.intersected(m_doc->rect());
+        if (!src.isEmpty()) {
+            QRectF dst(toView(QPointF(src.topLeft())), QSizeF(src.width() * m_zoom, src.height() * m_zoom));
+            if (m_zoom < 1.0)
+                p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            p.drawImage(dst, m_doc->composite(), src);
+        }
+    }
+    if (m_grid && m_zoom >= 2.0) {
+        p.setPen(QColor(0, 0, 0, m_zoom >= 6 ? 90 : 50));
+        QRect vis = QRectF(a, b).toAlignedRect().intersected(m_doc->rect());
+        for (int x = vis.left(); x <= vis.right() + 1; ++x) {
+            double vx = std::floor(o.x() + x * m_zoom);
+            p.drawLine(QPointF(vx, ir.top()), QPointF(vx, ir.bottom()));
+        }
+        for (int y = vis.top(); y <= vis.bottom() + 1; ++y) {
+            double vy = std::floor(o.y() + y * m_zoom);
+            p.drawLine(QPointF(ir.left(), vy), QPointF(ir.right(), vy));
+        }
+    }
+    p.restore();
+}
+
 void CanvasView::paintEvent(QPaintEvent *e)
 {
     QPainter p(viewport());
@@ -332,68 +413,29 @@ void CanvasView::paintEvent(QPaintEvent *e)
     p.fillRect(exposed, kWorkspace);
 
     const QPointF o = imageOrigin();
-    const QRectF ir(o, QSizeF(m_doc->width() * m_zoom, m_doc->height() * m_zoom));
+    const double tw = m_doc->width() * m_zoom, th = m_doc->height() * m_zoom;
+    const int n = m_tiled ? 1 : 0;
+    const QRectF all(o.x() - n * tw, o.y() - n * th, tw * (2 * n + 1), th * (2 * n + 1));
 
-    // soft drop shadow around the canvas
+    // soft drop shadow around the canvas (or the whole tile block)
     p.setPen(Qt::NoPen);
     for (int i = 1; i <= 4; ++i) {
         p.setBrush(QColor(0, 0, 0, 40 - i * 8));
-        p.drawRect(ir.adjusted(-i + 2, -i + 2, i + 1, i + 1).translated(1, 1));
+        p.drawRect(all.adjusted(-i + 2, -i + 2, i + 1, i + 1).translated(1, 1));
     }
-
-    const QRect target = ir.toAlignedRect().intersected(exposed);
-    if (!target.isEmpty()) {
-        p.setBrushOrigin(o);
-        p.fillRect(target, QBrush(m_checker));
-        p.setBrushOrigin(0, 0);
-
-        const QImage &comp = m_doc->composite();
-        if (m_zoom < 0.5) {
-            updateMip();
-            const double s = 1.0 / (1 << m_mipLevel);
-            QPointF a = viewToImage(target.topLeft()) * s;
-            QPointF b = viewToImage(QPointF(target.right() + 1, target.bottom() + 1)) * s;
-            QRectF src = QRectF(a, b).intersected(QRectF(m_mip.rect()));
-            QRectF dst(imageToView(src.topLeft() / s), imageToView(src.bottomRight() / s));
-            p.save();
-            p.setClipRect(target);
-            p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-            p.drawImage(dst, m_mip, src);
-            p.restore();
-        } else {
-        // integer source rect covering the exposed area
-        QPointF a = viewToImage(target.topLeft());
-        QPointF b = viewToImage(QPointF(target.right() + 1, target.bottom() + 1));
-        QRect src(QPoint(int(std::floor(a.x())), int(std::floor(a.y()))),
-                  QPoint(int(std::ceil(b.x())) - 1, int(std::ceil(b.y())) - 1));
-        src = src.intersected(m_doc->rect());
-        if (!src.isEmpty()) {
-            QRectF dst(imageToView(QPointF(src.topLeft())), QSizeF(src.width() * m_zoom, src.height() * m_zoom));
-            p.save();
-            p.setClipRect(target);
-            if (m_zoom < 1.0)
-                p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-            p.drawImage(dst, comp, src);
-            p.restore();
-        }
-        }
-
-        if (m_grid && m_zoom >= 2.0) {
-            p.save();
-            p.setClipRect(target);
-            p.setPen(QColor(0, 0, 0, m_zoom >= 6 ? 90 : 50));
-            QRect vis = QRectF(viewToImage(target.topLeft()), viewToImage(QPointF(target.right() + 1, target.bottom() + 1)))
-                            .toAlignedRect().intersected(m_doc->rect());
-            for (int x = vis.left(); x <= vis.right() + 1; ++x) {
-                double vx = std::floor(o.x() + x * m_zoom);
-                p.drawLine(QPointF(vx, ir.top()), QPointF(vx, ir.bottom()));
-            }
-            for (int y = vis.top(); y <= vis.bottom() + 1; ++y) {
-                double vy = std::floor(o.y() + y * m_zoom);
-                p.drawLine(QPointF(ir.left(), vy), QPointF(ir.right(), vy));
-            }
-            p.restore();
-        }
+    for (int ty = -n; ty <= n; ++ty)
+        for (int tx = -n; tx <= n; ++tx)
+            drawTile(p, exposed, o + QPointF(tx * tw, ty * th));
+    if (m_tiled) {
+        // mark the editable (centre) tile
+        p.save();
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(QColor(255, 255, 255, 160), 1));
+        p.drawRect(QRectF(o, QSizeF(tw, th)).adjusted(-0.5, -0.5, 0.5, 0.5));
+        QPen dash(QColor(0, 0, 0, 160), 1, Qt::DashLine);
+        p.setPen(dash);
+        p.drawRect(QRectF(o, QSizeF(tw, th)).adjusted(-0.5, -0.5, 0.5, 0.5));
+        p.restore();
     }
 
     drawSelection(p);
@@ -457,6 +499,11 @@ static ToolEvent makeEvent(CanvasView *v, QMouseEvent *e)
     ToolEvent te;
     te.viewPos = e->position();
     te.pos = v->viewToImage(e->position());
+    Tool *t = v->main()->currentTool();
+    if (v->tiled() && t && t->tileBehavior() == Tool::TileWrap) {
+        const double w = v->document()->width(), h = v->document()->height();
+        te.pos = QPointF(te.pos.x() - std::floor(te.pos.x() / w) * w, te.pos.y() - std::floor(te.pos.y() / h) * h);
+    }
     te.button = e->button();
     te.buttons = e->buttons();
     te.mods = e->modifiers();

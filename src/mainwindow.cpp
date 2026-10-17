@@ -7,6 +7,8 @@
 #include "dialogs.h"
 #include "icons.h"
 #include "ora.h"
+#include "animpanel.h"
+#include "pluginhost.h"
 
 #include <QApplication>
 #include <QStackedWidget>
@@ -268,6 +270,8 @@ MainWindow::MainWindow()
             view()->updateOverlay();
     });
     qApp->installEventFilter(this);
+    m_pluginHost = new PluginHost(this);
+    m_pluginHost->loadAll();
 
     if (!restoreGeometry(s.value("geometry").toByteArray()) || width() < 640 || height() < 480)
         resize(1100, 760);
@@ -356,6 +360,16 @@ void MainWindow::createActions()
             v->setShowRulers(on);
     });
 
+    QAction *tile = act("tileview", tr("&Tile Preview"), "tile", QKeySequence("Ctrl+Shift+T"));
+    tile->setCheckable(true);
+    tile->setToolTip(tr("Tile Preview: repeat the image around the canvas; painting wraps across edges (Ctrl+Shift+T)"));
+    connect(tile, &QAction::toggled, this, [this](bool on) {
+        m_settings.tileMode = on;
+        for (CanvasView *v : m_views)
+            v->setTiled(on);
+        m_settings.notify();
+    });
+
     // Image
     act("crop", tr("Crop to Selection"), "crop", QKeySequence("Ctrl+Shift+X"), &MainWindow::imageCrop);
     act("resize", tr("&Resize..."), "resize", QKeySequence("Ctrl+R"), &MainWindow::imageResize);
@@ -377,6 +391,7 @@ void MainWindow::createActions()
     act("layerflipv", tr("Flip &Vertical"), "flipv", QKeySequence(), &MainWindow::layerFlipV);
     act("layerrotate", tr("&Rotate / Zoom..."), "rotatezoom", QKeySequence("Ctrl+Shift+Z"), &MainWindow::layerRotateZoom);
     act("layerprops", tr("Layer &Properties..."), "layerprops", QKeySequence(Qt::Key_F4), &MainWindow::showLayerProperties);
+    act("layernormal", tr("Create &Normal Map Layer..."), "normalmap", QKeySequence(), &MainWindow::layerCreateNormalMap);
     act("layerup", tr("Move Layer &Up"), "layerup", QKeySequence(), &MainWindow::layerMoveUp);
     act("layerdown", tr("Move Layer &Down"), "layerdown", QKeySequence(), &MainWindow::layerMoveDown);
     // Ctrl+Shift+Z is taken by Rotate/Zoom, like the classic editor; keep Ctrl+Y for redo
@@ -413,6 +428,7 @@ void MainWindow::createActions()
     });
 
     act("help", tr("&Help Topics"), "help", QKeySequence::HelpContents, &MainWindow::showHelp);
+    act("plugins", tr("&Plugins..."), "plugin", QKeySequence(), &MainWindow::showPlugins);
     act("about", tr("&About PixelForge"), "help", QKeySequence(), &MainWindow::showAbout);
 
     // swap colours (X), like the classic editor
@@ -463,7 +479,7 @@ QWidget *MainWindow::createTopArea()
     QMenu *viewM = mb->addMenu(tr("&View"));
     viewM->addActions({A("zoomin"), A("zoomout"), A("zoomwindow"), A("zoomsel"), A("actualsize")});
     viewM->addSeparator();
-    viewM->addActions({A("grid"), A("rulers")});
+    viewM->addActions({A("grid"), A("rulers"), A("tileview")});
     QMenu *units = viewM->addMenu(tr("&Units"));
     auto *ug = new QActionGroup(this);
     const QStringList unitNames = {tr("&Pixels"), tr("&Inches"), tr("&Centimeters")};
@@ -488,6 +504,7 @@ QWidget *MainWindow::createTopArea()
     layers->addActions({A("layeradd"), A("layerdelete"), A("layerdup"), A("layermerge"), A("layerimport")});
     layers->addSeparator();
     layers->addActions({A("layerfliph"), A("layerflipv"), A("layerrotate")});
+    layers->addAction(A("layernormal"));
     layers->addSeparator();
     layers->addActions({A("layerup"), A("layerdown")});
     layers->addSeparator();
@@ -507,6 +524,10 @@ QWidget *MainWindow::createTopArea()
                 subs.insert(d.submenu, sm);
             }
             target = subs[d.submenu];
+            if (d.submenu == "Maps" && target->isEmpty()) {
+                target->addAction(A("layernormal"));
+                target->addSeparator();
+            }
         }
         QAction *a = target->addAction(Icons::get(d.icon), d.params.isEmpty() ? d.name : d.name + "...");
         if (!d.shortcut.isEmpty())
@@ -528,8 +549,11 @@ QWidget *MainWindow::createTopArea()
 
     QMenu *help = mb->addMenu(tr("&Help"));
     help->addAction(A("help"));
+    help->addAction(A("plugins"));
     help->addSeparator();
     help->addAction(A("about"));
+    m_menus = {{"File", file}, {"Edit", edit}, {"View", viewM}, {"Image", img}, {"Layers", layers},
+               {"Adjustments", m_menuAdjust}, {"Effects", m_menuEffects}, {"Window", win}, {"Help", help}};
 
     left->addWidget(mb);
     m_mainBar = createMainToolbar();
@@ -589,7 +613,7 @@ QToolBar *MainWindow::createMainToolbar()
     tb->addWidget(m_zoomCombo);
     tb->addAction(A("zoomin"));
     tb->addSeparator();
-    tb->addActions({A("grid"), A("rulers")});
+    tb->addActions({A("grid"), A("rulers"), A("tileview")});
     tb->addSeparator();
     auto *ul = new QLabel(tr(" Units: "));
     tb->addWidget(ul);
@@ -981,35 +1005,61 @@ void MainWindow::createPanels()
     m_layersWin->setContent(m_layersPanel);
     m_layersWin->setResizable(true);
 
-    QSettings s(kAppName, kAppName);
-    bool transl = m_actions["translucent"]->isChecked();
-    struct P { FloatingPanel *w; const char *id; QString name; QKeySequence ks; QString icon; };
-    QList<P> panels = {{m_toolsWin, "wintools", tr("&Tools"), QKeySequence(Qt::Key_F5), "tools"},
-                       {m_historyWin, "winhistory", tr("&History"), QKeySequence(Qt::Key_F6), "history"},
-                       {m_layersWin, "winlayers", tr("&Layers"), QKeySequence(Qt::Key_F7), "layers"},
-                       {m_colorsWin, "wincolors", tr("&Colors"), QKeySequence(Qt::Key_F8), "colors"}};
-    QMenu *win = m_actions["_windowmenu"]->menu();
-    QAction *before = m_actions["nexttab"];
-    for (const P &p : panels) {
-        QAction *a = new QAction(Icons::get(p.icon), p.name, this);
-        a->setShortcut(p.ks);
-        a->setCheckable(true);
-        a->setChecked(s.value(QString("panel/") + p.id, true).toBool());
-        p.w->setVisible(a->isChecked());
-        connect(a, &QAction::toggled, p.w, &QWidget::setVisible);
-        FloatingPanel *w = p.w;
-        connect(p.w, &FloatingPanel::closeRequested, a, [a] { a->setChecked(false); });
-        Q_UNUSED(w);
-        win->insertAction(before, a);
-        m_actions.insert(p.id, a);
-        addAction(a);
-        p.w->setTranslucency(transl);
-    }
-    win->insertSeparator(before);
+    m_panelSeparator = m_actions["_windowmenu"]->menu()->insertSeparator(m_actions["nexttab"]);
+    registerPanel(m_toolsWin, "wintools", tr("&Tools"), QKeySequence(Qt::Key_F5), Icons::get("tools"), true);
+    registerPanel(m_historyWin, "winhistory", tr("&History"), QKeySequence(Qt::Key_F6), Icons::get("history"), true);
+    registerPanel(m_layersWin, "winlayers", tr("&Layers"), QKeySequence(Qt::Key_F7), Icons::get("layers"), true);
+    registerPanel(m_colorsWin, "wincolors", tr("&Colors"), QKeySequence(Qt::Key_F8), Icons::get("colors"), true);
+
+    m_animPanel = new AnimationPanel(this);
+    addFloatingPanel("winanim", tr("&Animation"), m_animPanel, QKeySequence(Qt::Key_F9), Icons::get("animation"), false,
+                     QSize(230, 330));
     connect(m_actions["translucent"], &QAction::toggled, this, [this](bool on) {
-        for (FloatingPanel *p : {m_toolsWin, m_colorsWin, m_historyWin, m_layersWin})
+        for (FloatingPanel *p : m_panels)
             p->setTranslucency(on);
     });
+}
+
+void MainWindow::registerPanel(FloatingPanel *w, const QString &id, const QString &name, const QKeySequence &ks,
+                               const QIcon &icon, bool defaultVisible)
+{
+    QSettings s(kAppName, kAppName);
+    QAction *a = new QAction(icon, name, this);
+    a->setShortcut(ks);
+    a->setCheckable(true);
+    a->setChecked(s.value("panel/" + id, defaultVisible).toBool());
+    w->setVisible(a->isChecked());
+    connect(a, &QAction::toggled, w, [w](bool on) {
+        w->setVisible(on);
+        if (on)
+            w->raise();
+    });
+    connect(w, &FloatingPanel::closeRequested, a, [a] { a->setChecked(false); });
+    m_actions["_windowmenu"]->menu()->insertAction(m_panelSeparator, a);
+    m_actions.insert(id, a);
+    addAction(a);
+    w->setTranslucency(m_actions["translucent"]->isChecked());
+    m_panels.append(w);
+    m_panelIds.append(id);
+}
+
+FloatingPanel *MainWindow::addFloatingPanel(const QString &id, const QString &title, QWidget *content,
+                                            const QKeySequence &ks, const QIcon &icon, bool defaultVisible,
+                                            const QSize &size)
+{
+    auto *w = new FloatingPanel(QString(title).remove('&'), m_workspace);
+    w->setContent(content);
+    w->setResizable(true);
+    // extra windows line up to the left of the History window
+    int x = 212;
+    for (int i = 4; i < m_panels.size(); ++i)
+        x += m_panels[i]->width() + 6;
+    w->setHomeGeometry(QRect(QPoint(x, 6), size), Qt::AlignRight | Qt::AlignTop);
+    w->resize(size);
+    registerPanel(w, id, title, ks, icon, defaultVisible);
+    if (m_panelsPlaced)
+        w->resetToHome();
+    return w;
 }
 
 void MainWindow::layoutPanels(bool initial)
@@ -1025,14 +1075,14 @@ void MainWindow::layoutPanels(bool initial)
         m_colorsWin->setHomeGeometry(QRect(QPoint(6, 6), cs), Qt::AlignLeft | Qt::AlignBottom);
         m_historyWin->setHomeGeometry(QRect(QPoint(6, 6), QSize(200, 200)), Qt::AlignRight | Qt::AlignTop);
         m_layersWin->setHomeGeometry(QRect(QPoint(6, 6), QSize(200, 220)), Qt::AlignRight | Qt::AlignBottom);
-        for (FloatingPanel *p : {m_toolsWin, m_colorsWin, m_historyWin, m_layersWin}) {
+        for (FloatingPanel *p : m_panels) {
             p->resetToHome();
             p->raise();
         }
         m_panelsPlaced = true;
         return;
     }
-    for (FloatingPanel *p : {m_toolsWin, m_colorsWin, m_historyWin, m_layersWin})
+    for (FloatingPanel *p : m_panels)
         p->placeAnchored();
 }
 
@@ -1156,6 +1206,7 @@ void MainWindow::addDocument(Document *doc, bool fit)
     auto *v = new CanvasView(doc, this);
     v->setShowGrid(m_actions["grid"]->isChecked());
     v->setShowRulers(m_actions["rulers"]->isChecked());
+    v->setTiled(m_actions["tileview"]->isChecked());
     m_docs.append(doc);
     m_views.append(v);
     m_stack->addWidget(v);
@@ -1235,6 +1286,9 @@ void MainWindow::setCurrentDocument(int i)
         m_views[i]->setFocus();
     }
     m_historyPanel->setDocument(document());
+    m_animPanel->setDocument(document());
+    if (m_pluginHost)
+        m_pluginHost->setDocument(document());
     m_layersPanel->setDocument(document());
     m_tabs->refresh();
     updateTitle();
@@ -1265,7 +1319,7 @@ void MainWindow::updateActions()
                            "selectall", "invertsel", "erasesel", "fillsel", "zoomin", "zoomout", "zoomwindow",
                            "actualsize", "resize", "canvassize", "fliph", "flipv", "rotcw", "rotccw", "rot180",
                            "flatten", "layeradd", "layerdup", "layerimport", "layerfliph", "layerflipv",
-                           "layerrotate", "layerprops", "histfirst", "histlast", "repeateffect"})
+                           "layerrotate", "layerprops", "layernormal", "histfirst", "histlast", "repeateffect"})
         m_actions[id]->setEnabled(has);
     m_actions["crop"]->setEnabled(sel);
     m_actions["deselect"]->setEnabled(sel);
@@ -1753,8 +1807,8 @@ void MainWindow::closeEvent(QCloseEvent *e)
     s.setValue("lastDir", m_lastDir);
     s.setValue("units", int(m_settings.units));
     s.setValue("translucent", m_actions["translucent"]->isChecked());
-    for (const char *id : {"wintools", "winhistory", "winlayers", "wincolors"})
-        s.setValue(QString("panel/") + id, m_actions[id]->isChecked());
+    for (const QString &id : m_panelIds)
+        s.setValue("panel/" + id, m_actions[id]->isChecked());
     e->accept();
 }
 
@@ -2269,6 +2323,36 @@ void MainWindow::layerRotateZoom()
         d->pushHistory(tr("Rotate / Zoom Layer"), Icons::get("rotatezoom"));
 }
 
+void MainWindow::layerCreateNormalMap()
+{
+    Document *d = document();
+    if (!d) return;
+    commitTool();
+    const EffectDef *def = nullptr;
+    for (const EffectDef &e : effectRegistry())
+        if (e.name == "Normal Map")
+            def = &e;
+    if (!def)
+        return;
+    const QVector<Layer> before = d->layers();
+    const int active = d->activeIndex();
+    // height source: the visible image, so painted detail on any layer contributes
+    QVector<Layer> layers = before;
+    Layer l;
+    l.image = d->flattened();
+    l.name = "normal";
+    layers.insert(active + 1, l);
+    d->setLayers(layers, d->size(), active + 1);
+    EffectDialog dlg(this, d, *def, m_effectValues.value(def->name), this);
+    dlg.setWindowTitle(tr("Create Normal Map Layer"));
+    if (dlg.exec() != QDialog::Accepted) {
+        d->setLayers(before, d->size(), active);
+        return;
+    }
+    m_effectValues[def->name] = dlg.values();
+    d->pushHistory(tr("Create Normal Map Layer"), Icons::get("normalmap"));
+}
+
 void MainWindow::showLayerProperties()
 {
     Document *d = document();
@@ -2371,10 +2455,42 @@ void MainWindow::showHelp()
     box.exec();
 }
 
+void MainWindow::addPluginAction(const QString &menu, QAction *action)
+{
+    QMenu *m = m_menus.value(menu, m_menus.value("Window"));
+    if (menu == "Help")
+        m->insertAction(m_actions["about"], action);
+    else
+        m->addAction(action);
+    addAction(action);
+}
+
+void MainWindow::showPlugins()
+{
+    QString html = tr("<h3>Plugins</h3>");
+    if (m_pluginHost->plugins().isEmpty())
+        html += tr("<p>No plugins installed.</p>");
+    for (const LoadedPlugin &p : m_pluginHost->plugins()) {
+        if (p.error.isEmpty())
+            html += QString("<p><b>%1</b> %2<br>%3<br><small>%4</small></p>")
+                        .arg(p.name.toHtmlEscaped(), p.version.toHtmlEscaped(), p.description.toHtmlEscaped(),
+                             p.file.toHtmlEscaped());
+        else
+            html += QString("<p><b>%1</b><br><span style='color:#b00'>%2</span></p>")
+                        .arg(p.file.toHtmlEscaped(), p.error.toHtmlEscaped());
+    }
+    html += tr("<p>Search paths:<br><small>%1</small></p>").arg(PluginHost::searchPaths().join("<br>").toHtmlEscaped());
+    QMessageBox box(this);
+    box.setWindowTitle(tr("Plugins"));
+    box.setTextFormat(Qt::RichText);
+    box.setText(html);
+    box.exec();
+}
+
 void MainWindow::showAbout()
 {
     QMessageBox::about(this, tr("About PixelForge"),
-                       tr("<h2>PixelForge 1.0</h2>"
+                       tr("<h2>PixelForge 1.1</h2>"
                           "<p>A free image editor for Linux with a classic, familiar workflow: "
                           "floating tool windows, layers with blend modes, unlimited history, "
                           "adjustments and effects.</p>"

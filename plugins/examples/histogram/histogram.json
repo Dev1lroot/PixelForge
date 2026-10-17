@@ -1,0 +1,5 @@
+{
+    "name": "Histogram",
+    "version": "1.0",
+    "description": "Example plugin: floating window with a live RGB histogram"
+}

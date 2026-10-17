@@ -231,6 +231,31 @@ static void compositeTemp(QImage &layer, const QImage &backup, const QImage &tem
     compositeTemp(layer, backup, temp, QPoint(0, 0), r, alphaBlend, opacity, mode, doc);
 }
 
+QVector<QPointF> tileOffsets(const Document *d, const ToolSettings &s)
+{
+    if (!s.tileMode)
+        return {QPointF(0, 0)};
+    QVector<QPointF> v;
+    for (int ty = -1; ty <= 1; ++ty)
+        for (int tx = -1; tx <= 1; ++tx)
+            v << QPointF(tx * d->width(), ty * d->height());
+    return v;
+}
+
+static QPainterPath tiledPath(const QPainterPath &path, const Document *d, const ToolSettings &s)
+{
+    if (!s.tileMode)
+        return path;
+    QPainterPath out;
+    const QRectF canvas(d->rect());
+    for (const QPointF &o : tileOffsets(d, s)) {
+        QPainterPath t = path.translated(o);
+        if (t.controlPointRect().adjusted(-s.brushWidth, -s.brushWidth, s.brushWidth, s.brushWidth).intersects(canvas))
+            out.addPath(t);
+    }
+    return out;
+}
+
 // transparent scratch image covering `r` (clipped to the canvas); paint with painter translated by -origin
 static QImage scratch(const QRect &r)
 {
@@ -453,6 +478,7 @@ class MagicWandTool : public Tool
 {
 public:
     using Tool::Tool;
+    TileBehavior tileBehavior() const override { return TileWrap; }
     ToolId id() const override { return ToolId::MagicWand; }
     QString name() const override { return QObject::tr("Magic Wand"); }
     QString iconName() const override { return "magicwand"; }
@@ -980,6 +1006,7 @@ class BucketTool : public Tool
 {
 public:
     using Tool::Tool;
+    TileBehavior tileBehavior() const override { return TileWrap; }
     ToolId id() const override { return ToolId::Bucket; }
     QString name() const override { return QObject::tr("Paint Bucket"); }
     QString iconName() const override { return "bucket"; }
@@ -1327,7 +1354,18 @@ public:
 
 protected:
     virtual bool beginStroke(const ToolEvent &) { return true; }
-    virtual void segment(const QPointF &a, const QPointF &b) = 0;
+    virtual void segmentAt(const QPointF &a, const QPointF &b) = 0;
+
+    // in tile mode every segment is also painted on the wrapped copies so strokes cross edges seamlessly
+    void segment(const QPointF &a, const QPointF &b)
+    {
+        const qreal pad = settings().brushWidth / 2.0 + 2;
+        for (const QPointF &o : tileOffsets(m_doc, settings())) {
+            QRectF r = QRectF(a + o, b + o).normalized().adjusted(-pad, -pad, pad, pad);
+            if (r.intersects(QRectF(m_doc->rect())))
+                segmentAt(a + o, b + o);
+        }
+    }
     virtual bool showsBrushCursor() const { return true; }
 
     QColor strokeColor() const { return m_right ? colors().secondary : colors().primary; }
@@ -1381,7 +1419,7 @@ public:
     }
 
 protected:
-    void segment(const QPointF &a, const QPointF &b) override
+    void segmentAt(const QPointF &a, const QPointF &b) override
     {
         QColor c = strokeColor();
         paintSegment(a, b, settings().brushWidth, settings().antialias, CompMode::Normal, c.alphaF(),
@@ -1404,7 +1442,7 @@ public:
     }
 
 protected:
-    void segment(const QPointF &a, const QPointF &b) override
+    void segmentAt(const QPointF &a, const QPointF &b) override
     {
         paintSegment(a, b, settings().brushWidth, settings().antialias, CompMode::Erase, 1.0, true);
     }
@@ -1427,7 +1465,7 @@ public:
 
 protected:
     bool showsBrushCursor() const override { return false; }
-    void segment(const QPointF &a0, const QPointF &b0) override
+    void segmentAt(const QPointF &a0, const QPointF &b0) override
     {
         QPointF a(std::floor(a0.x()) + 0.5, std::floor(a0.y()) + 0.5);
         QPointF b(std::floor(b0.x()) + 0.5, std::floor(b0.y()) + 0.5);
@@ -1511,7 +1549,7 @@ protected:
         return true;
     }
 
-    void segment(const QPointF &a, const QPointF &b) override
+    void segmentAt(const QPointF &a, const QPointF &b) override
     {
         qreal width = settings().brushWidth;
         QRect r = strokeBounds(a, b, width).intersected(m_doc->rect());
@@ -1534,7 +1572,8 @@ protected:
         {
             QPainter p(&temp);
             p.translate(-r.topLeft());
-            p.drawImage(QPointF(-m_offset.x(), -m_offset.y()), m_src);
+            for (const QPointF &o : tileOffsets(m_doc, settings()))
+                p.drawImage(QPointF(-m_offset.x(), -m_offset.y()) + o, m_src);
             p.setCompositionMode(QPainter::CompositionMode_DestinationIn);
             p.drawImage(r.topLeft(), m_stroke, r);
         }
@@ -1596,7 +1635,7 @@ protected:
         return true;
     }
 
-    void segment(const QPointF &a, const QPointF &b) override
+    void segmentAt(const QPointF &a, const QPointF &b) override
     {
         const qreal radius = std::max(0.5, settings().brushWidth / 2.0);
         QColor from = m_right ? colors().primary : colors().secondary;
@@ -1662,6 +1701,7 @@ class ColorPickerTool : public Tool
 {
 public:
     using Tool::Tool;
+    TileBehavior tileBehavior() const override { return TileWrap; }
     ToolId id() const override { return ToolId::ColorPicker; }
     QString name() const override { return QObject::tr("Color Picker"); }
     QString iconName() const override { return "colorpicker"; }
@@ -1735,6 +1775,7 @@ class TextTool : public Tool
 {
 public:
     using Tool::Tool;
+    TileBehavior tileBehavior() const override { return TileWrap; }
     ToolId id() const override { return ToolId::Text; }
     QString name() const override { return QObject::tr("Text"); }
     QString iconName() const override { return "text"; }
@@ -2009,7 +2050,9 @@ private:
         QPainterPath text;
         for (int i = 0; i < m_lines.size(); ++i)
             text.addText(QPointF(lineX(i), m_origin.y() + i * fm.lineSpacing() + fm.ascent()), f, m_lines[i]);
-        QRect bounds = (text.boundingRect() | textBounds()).adjusted(-4, -4, 4, 4).toAlignedRect().intersected(m_doc->rect());
+        const QRectF editBox = textBounds();
+        text = tiledPath(text, m_doc, settings());
+        QRect bounds = (text.boundingRect() | editBox).adjusted(-4, -4, 4, 4).toAlignedRect().intersected(m_doc->rect());
         QImage temp = scratch(bounds);
         {
             QPainter p(&temp);
@@ -2215,7 +2258,8 @@ private:
     void render()
     {
         QColor col = m_right ? colors().secondary : colors().primary;
-        QRect r = curve().controlPointRect().adjusted(-settings().brushWidth - 2, -settings().brushWidth - 2,
+        const QPainterPath path = tiledPath(curve(), m_doc, settings());
+        QRect r = path.controlPointRect().adjusted(-settings().brushWidth - 2, -settings().brushWidth - 2,
                                                        settings().brushWidth + 2, settings().brushWidth + 2).toAlignedRect();
         const QRect tr = r.intersected(m_doc->rect());
         QImage temp = scratch(tr);
@@ -2225,7 +2269,7 @@ private:
             p.setRenderHint(QPainter::Antialiasing, settings().antialias);
             p.setPen(dashPen(opaque(col), settings().brushWidth, settings().lineStyle));
             p.setBrush(Qt::NoBrush);
-            p.drawPath(curve());
+            p.drawPath(path);
         }
         QRect dirty = r.united(m_lastRect);
         m_lastRect = r;
@@ -2377,6 +2421,7 @@ private:
             path.closeSubpath();
             break;
         }
+        path = tiledPath(path, m_doc, settings());
         QRect bounds = path.boundingRect().adjusted(-w - 2, -w - 2, w + 2, w + 2).toAlignedRect();
         const QRect tr = bounds.intersected(m_doc->rect());
         QImage temp = scratch(tr);

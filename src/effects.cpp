@@ -942,6 +942,116 @@ static void fxInkSketch(const QImage &s, QImage &d, const QRect &r, const QVaria
     });
 }
 
+// ---------------------------------------------------------------- texture maps
+
+// height field in [0,1] from one channel of a straight-alpha image
+static std::vector<float> heightField(const QImage &s, int source, bool invert)
+{
+    const int w = s.width(), h = s.height();
+    std::vector<float> hf(size_t(w) * h);
+    parallelRows(0, h - 1, [&](int y) {
+        const QRgb *l = reinterpret_cast<const QRgb *>(s.constScanLine(y));
+        for (int x = 0; x < w; ++x) {
+            QRgb p = l[x];
+            float v;
+            switch (source) {
+            case 1: v = qRed(p) / 255.0f; break;
+            case 2: v = qGreen(p) / 255.0f; break;
+            case 3: v = qBlue(p) / 255.0f; break;
+            case 4: v = qAlpha(p) / 255.0f; break;
+            default: v = lum(p) / 255.0f * (qAlpha(p) / 255.0f); break;
+            }
+            hf[size_t(y) * w + x] = invert ? 1.0f - v : v;
+        }
+    });
+    return hf;
+}
+
+// separable box blur (3 passes ~ gaussian) on a float field, optionally wrapping at the edges
+static void blurField(std::vector<float> &f, int w, int h, int radius, bool wrap)
+{
+    if (radius <= 0)
+        return;
+    std::vector<float> tmp(f.size());
+    auto idx = [&](int i, int n) { return wrap ? ((i % n) + n) % n : std::clamp(i, 0, n - 1); };
+    const float div = 1.0f / (2 * radius + 1);
+    for (int pass = 0; pass < 3; ++pass) {
+        parallelRows(0, h - 1, [&](int y) {
+            const float *row = &f[size_t(y) * w];
+            float acc = 0;
+            for (int i = -radius; i <= radius; ++i)
+                acc += row[idx(i, w)];
+            for (int x = 0; x < w; ++x) {
+                tmp[size_t(y) * w + x] = acc * div;
+                acc += row[idx(x + radius + 1, w)] - row[idx(x - radius, w)];
+            }
+        });
+        parallelRows(0, w - 1, [&](int x) {
+            float acc = 0;
+            for (int i = -radius; i <= radius; ++i)
+                acc += tmp[size_t(idx(i, h)) * w + x];
+            for (int y = 0; y < h; ++y) {
+                f[size_t(y) * w + x] = acc * div;
+                acc += tmp[size_t(idx(y + radius + 1, h)) * w + x] - tmp[size_t(idx(y - radius, h)) * w + x];
+            }
+        });
+    }
+}
+
+static void fxNormalMap(const QImage &s, QImage &d, const QRect &r, const QVariantMap &p)
+{
+    const int w = s.width(), h = s.height();
+    const bool wrap = p["wrap"].toBool();
+    std::vector<float> hf = heightField(s, p["source"].toInt(), p["invert"].toBool());
+    blurField(hf, w, h, p["smooth"].toInt(), wrap);
+    const float strength = float(p["strength"].toDouble());
+    const float ySign = p["format"].toInt() == 1 ? -1.0f : 1.0f;     // DirectX flips green
+    auto H = [&](int x, int y) {
+        x = wrap ? ((x % w) + w) % w : std::clamp(x, 0, w - 1);
+        y = wrap ? ((y % h) + h) % h : std::clamp(y, 0, h - 1);
+        return hf[size_t(y) * w + x];
+    };
+    perPixel(s, d, r, [&](QRgb, int x, int y) {
+        // Sobel gradient of the height field
+        float dx = (H(x + 1, y - 1) + 2 * H(x + 1, y) + H(x + 1, y + 1)) - (H(x - 1, y - 1) + 2 * H(x - 1, y) + H(x - 1, y + 1));
+        float dy = (H(x - 1, y + 1) + 2 * H(x, y + 1) + H(x + 1, y + 1)) - (H(x - 1, y - 1) + 2 * H(x, y - 1) + H(x + 1, y - 1));
+        float nx = -dx * strength, ny = dy * strength * ySign, nz = 1.0f;
+        float len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        nx /= len; ny /= len; nz /= len;
+        return qRgba(clamp255((nx * 0.5 + 0.5) * 255), clamp255((ny * 0.5 + 0.5) * 255), clamp255((nz * 0.5 + 0.5) * 255), 255);
+    });
+}
+
+static void fxHeightMap(const QImage &s, QImage &d, const QRect &r, const QVariantMap &p)
+{
+    const int w = s.width(), h = s.height();
+    std::vector<float> hf = heightField(s, p["source"].toInt(), p["invert"].toBool());
+    blurField(hf, w, h, p["smooth"].toInt(), p["wrap"].toBool());
+    const double c = p["contrast"].toDouble() / 100.0;
+    const double k = c >= 0 ? 1 + c * 3 : 1 + c;
+    perPixel(s, d, r, [&](QRgb, int x, int y) {
+        int v = clamp255(((hf[size_t(y) * w + x] - 0.5) * k + 0.5) * 255);
+        return qRgba(v, v, v, 255);
+    });
+}
+
+static void fxNormalize(const QImage &s, QImage &d, const QRect &r, const QVariantMap &)
+{
+    perPixel(s, d, r, [](QRgb px, int, int) {
+        double nx = qRed(px) / 127.5 - 1, ny = qGreen(px) / 127.5 - 1, nz = qBlue(px) / 127.5 - 1;
+        nz = std::max(nz, 0.0);
+        double len = std::sqrt(nx * nx + ny * ny + nz * nz);
+        if (len < 1e-6) { nx = ny = 0; nz = len = 1; }
+        return qRgba(clamp255((nx / len * 0.5 + 0.5) * 255), clamp255((ny / len * 0.5 + 0.5) * 255),
+                     clamp255((nz / len * 0.5 + 0.5) * 255), qAlpha(px));
+    });
+}
+
+static void fxFlipGreen(const QImage &s, QImage &d, const QRect &r, const QVariantMap &)
+{
+    perPixel(s, d, r, [](QRgb px, int, int) { return qRgba(qRed(px), 255 - qGreen(px), qBlue(px), qAlpha(px)); });
+}
+
 // ============================================================ registry
 
 const QVector<EffectDef> &effectRegistry()
@@ -1026,6 +1136,18 @@ const QVector<EffectDef> &effectRegistry()
                                             P("zoom", QO::tr("Zoom"), 0.1, 50, 1, EffectParam::Double, 1)}, fxJulia);
     fx("Render", QO::tr("Mandelbrot Fractal"), {P("factor", QO::tr("Factor"), 1, 10, 1), P("quality", QO::tr("Quality"), 1, 5, 2),
                                                  P("zoom", QO::tr("Zoom"), 0.1, 50, 1, EffectParam::Double, 1), B("invert", QO::tr("Invert colors"), false)}, fxMandelbrot);
+
+    const QStringList sources = {QO::tr("Luminance"), QO::tr("Red"), QO::tr("Green"), QO::tr("Blue"), QO::tr("Alpha")};
+    fx("Maps", QO::tr("Normal Map"), {P("strength", QO::tr("Strength"), 0.1, 30, 4, EffectParam::Double, 1),
+                                       P("smooth", QO::tr("Smoothing radius"), 0, 20, 0), C("source", QO::tr("Height from"), sources),
+                                       B("invert", QO::tr("Invert height"), false),
+                                       C("format", QO::tr("Format"), {QO::tr("OpenGL (Y+)"), QO::tr("DirectX (Y-)")}),
+                                       B("wrap", QO::tr("Seamless (wrap edges)"), true)}, fxNormalMap);
+    fx("Maps", QO::tr("Height Map"), {C("source", QO::tr("Height from"), sources), B("invert", QO::tr("Invert"), false),
+                                       P("smooth", QO::tr("Smoothing radius"), 0, 20, 0), P("contrast", QO::tr("Contrast"), -100, 100, 0),
+                                       B("wrap", QO::tr("Seamless (wrap edges)"), true)}, fxHeightMap);
+    fx("Maps", QO::tr("Normalize Normal Map"), {}, fxNormalize);
+    fx("Maps", QO::tr("Flip Normal Green (OpenGL / DirectX)"), {}, fxFlipGreen);
 
     fx("Stylize", QO::tr("Edge Detect"), {P("angle", QO::tr("Angle"), -180, 180, 45, EffectParam::Angle)}, fxEdgeDetect);
     fx("Stylize", QO::tr("Emboss"), {P("angle", QO::tr("Angle"), -180, 180, 0, EffectParam::Angle)}, fxEmboss);

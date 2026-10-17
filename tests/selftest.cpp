@@ -6,16 +6,21 @@
 #include "effects.h"
 #include "ora.h"
 #include "icons.h"
+#include "animpanel.h"
 
 #include <QApplication>
 #include <QAction>
 #include <QMouseEvent>
+#include <QPaintEvent>
 #include <QKeyEvent>
 #include <QElapsedTimer>
 #include <QDir>
 #include <QPushButton>
 #include <QMenuBar>
 #include <QMenu>
+#include <QComboBox>
+#include <QLabel>
+#include <QPainter>
 #include <cstdio>
 
 static int g_fail = 0, g_pass = 0;
@@ -81,6 +86,12 @@ static void shot(const char *name)
     pump();
     g_win->grab().save(g_shotDir + "/" + name + ".png");
 }
+
+// Plugins kept outside this repository can add tests: their CMakeLists.txt defines
+// PIXELFORGE_LOCAL_TESTS as a file that implements localPluginTests().
+#ifdef PIXELFORGE_LOCAL_TESTS
+#include PIXELFORGE_LOCAL_TESTS
+#endif
 
 int main(int argc, char **argv)
 {
@@ -361,6 +372,157 @@ int main(int argc, char **argv)
                 dlg.reject();
             }
     }
+
+    std::printf("[tile view]\n");
+    {
+        auto *td = new Document(QSize(100, 80), Qt::white);
+        td->resetHistory("New Image", Icons::get("new"));
+        w.addDocument(td, false);
+        pump();
+        w.view()->setZoom(2.0);
+        w.action("tileview")->trigger();
+        pump();
+        CHECK(w.view()->tiled() && w.settings().tileMode, "tile preview toggles on");
+        QPointF v0 = w.view()->imageToView(QPointF(0, 0));
+        QPointF v1 = w.view()->imageToView(QPointF(100, 0));
+        CHECK(std::abs((v1.x() - v0.x()) - 200) < 0.5, "main tile keeps its size");
+        w.colors().setPrimary(Qt::black);
+        w.settings().brushWidth = 4;
+        w.setActiveTool(ToolId::Brush);
+        drag({90, 20}, {110, 20});
+        CHECK(near(px(95, 20), Qt::black) && near(px(5, 20), Qt::black), "stroke across the right edge wraps to the left");
+        drag({150, 40}, {160, 40});                  // entirely on the right-hand neighbour tile
+        CHECK(near(px(55, 40), Qt::black), "painting on a neighbour tile lands in the canvas");
+        {
+            // a change must schedule repaints on the neighbour copies too, not only the centre tile
+            struct Spy : QObject {
+                QRegion painted;
+                bool eventFilter(QObject *, QEvent *e) override
+                {
+                    if (e->type() == QEvent::Paint)
+                        painted += static_cast<QPaintEvent *>(e)->region();
+                    return false;
+                }
+            } spy;
+            pump();
+            w.view()->viewport()->installEventFilter(&spy);
+            td->invalidate(QRect(40, 30, 4, 4));
+            pump();
+            w.view()->viewport()->removeEventFilter(&spy);
+            QPointF centre = w.view()->imageToView(QPointF(42, 32));
+            QPointF right = w.view()->imageToView(QPointF(142, 32));
+            QPointF below = w.view()->imageToView(QPointF(42, 112));
+            CHECK(spy.painted.contains(centre.toPoint()) && spy.painted.contains(right.toPoint()) &&
+                      spy.painted.contains(below.toPoint()),
+                  "pixel changes repaint all tile copies immediately");
+        }
+        w.colors().setPrimary(QColor(255, 0, 0));
+        w.setActiveTool(ToolId::Bucket);
+        click({130, 70});                            // neighbour tile -> wrapped to (30,70)
+        CHECK(near(px(30, 70), QColor(255, 0, 0)), "bucket click on a neighbour tile fills the wrapped point");
+        w.setActiveTool(ToolId::Ellipse);
+        w.settings().shapeType = ShapeType::Filled;
+        drag({-15, 30}, {15, 60});
+        CHECK(near(px(2, 45), QColor(255, 0, 0)) && near(px(97, 45), QColor(255, 0, 0)), "shape across the left edge wraps");
+        shot("09-tile-view");
+        w.action("tileview")->trigger();
+        CHECK(!w.view()->tiled(), "tile preview toggles off");
+        w.setActiveTool(ToolId::Brush);
+    }
+
+    std::printf("[normal maps]\n");
+    {
+        const EffectDef *nm = nullptr, *flip = nullptr, *norm = nullptr;
+        for (const EffectDef &e : effectRegistry()) {
+            if (e.name == "Normal Map") nm = &e;
+            if (e.name.startsWith("Flip Normal Green")) flip = &e;
+            if (e.name == "Normalize Normal Map") norm = &e;
+        }
+        CHECK(nm && flip && norm, "maps effects registered");
+        auto *nd = new Document(QSize(64, 64), Qt::white);
+        nd->resetHistory("New Image", Icons::get("new"));
+        w.addDocument(nd, false);
+        QVariantMap p{{"strength", 4.0}, {"smooth", 0}, {"source", 0}, {"invert", false}, {"format", 0}, {"wrap", false}};
+        runEffect(nd, *nm, p, nd->activeImage());
+        QColor flat = px(32, 32);
+        CHECK(std::abs(flat.red() - 128) <= 1 && std::abs(flat.green() - 128) <= 1 && flat.blue() >= 254, "flat height gives (128,128,255)");
+        QImage ramp(64, 64, QImage::Format_ARGB32_Premultiplied);
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x)
+                ramp.setPixel(x, y, qRgb(x * 4, x * 4, x * 4));
+        runEffect(nd, *nm, p, ramp);
+        CHECK(px(32, 32).red() < 110 && std::abs(px(32, 32).green() - 128) <= 2, "height rising to the right tilts normal left (red < 128)");
+        QImage vramp(64, 64, QImage::Format_ARGB32_Premultiplied);
+        for (int y = 0; y < 64; ++y)
+            for (int x = 0; x < 64; ++x)
+                vramp.setPixel(x, y, qRgb(y * 4, y * 4, y * 4));
+        runEffect(nd, *nm, p, vramp);
+        int glGreen = px(32, 32).green();
+        p["format"] = 1;
+        runEffect(nd, *nm, p, vramp);
+        CHECK(glGreen > 140 && px(32, 32).green() < 116, "OpenGL vs DirectX green convention");
+        runEffect(nd, *flip, {}, nd->activeImage());
+        CHECK(std::abs(px(32, 32).green() - glGreen) <= 1, "flip green converts DirectX to OpenGL");
+        p["format"] = 0;
+        p["wrap"] = true;
+        runEffect(nd, *nm, p, ramp);
+        CHECK(px(0, 32).red() > 140, "seamless mode sees the wrap-around step at the edge");
+    }
+
+    std::printf("[animation panel]\n");
+    {
+        AnimationPanel *ap = w.animationPanel();
+        auto *sd = new Document(QSize(16, 64), Qt::white);
+        sd->resetHistory("New Image", Icons::get("new"));
+        w.addDocument(sd, false);
+        for (int f = 0; f < 4; ++f)
+            for (int y = 0; y < 16; ++y)
+                for (int x = 0; x < 16; ++x)
+                    sd->activeImage().setPixel(x, f * 16 + y, qRgb(f * 60, 0, 0));
+        sd->invalidate();
+        ap->setMode(AnimationPanel::VerticalStrip);
+        CHECK(ap->frameCount() == 4, "vertical strip: 16x64 auto-detects 4 square frames");
+        CHECK(ap->frame(2).size() == QSize(16, 16) && qRed(ap->frame(2).pixel(5, 5)) == 120, "frame 3 is the third square");
+        ap->setMode(AnimationPanel::ScrollVertical);
+        CHECK(ap->frameCount() == 64 && qRed(ap->frame(16).pixel(0, 0)) == 60, "vertical scroll wraps by step");
+        ap->setMode(AnimationPanel::LayerFrames);
+        w.action("layeradd")->trigger();
+        w.action("layeradd")->trigger();
+        CHECK(ap->frameCount() == 3, "layers as frames counts layers");
+        ap->setMode(AnimationPanel::HorizontalStrip);
+        CHECK(ap->frameCount() == 1, "horizontal strip of a tall image has one frame");
+        w.action("winanim")->setChecked(true);
+        ap->setMode(AnimationPanel::VerticalStrip);
+    }
+
+#ifdef PIXELFORGE_HAVE_EXAMPLES
+    std::printf("[example plugins]\n");
+    {
+        CHECK(w.findChild<QAction *>("example_hello") != nullptr, "hello plugin added its Help menu action");
+        CHECK(w.findChild<QAction *>("example_exportlayers") != nullptr, "export layers plugin added its File menu action");
+        QAction *hist = w.action("plugin_histogram");
+        CHECK(hist != nullptr, "histogram plugin registered its window");
+        if (hist) {
+            auto *hd = new Document(QSize(10, 10), Qt::white);
+            hd->resetHistory("New Image", Icons::get("new"));
+            w.addDocument(hd, false);
+            hist->setChecked(true);
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < 200)
+                QApplication::processEvents();
+            bool found = false;
+            for (QLabel *l : w.findChildren<QLabel *>())
+                found |= l->isVisible() && l->text() == "100 opaque pixels";
+            CHECK(found, "histogram window counts the pixels of the current image");
+            hist->setChecked(false);
+        }
+    }
+#endif
+
+#ifdef PIXELFORGE_LOCAL_TESTS
+    localPluginTests(w);
+#endif
 
     std::printf("[performance 4000x3000]\n");
     {

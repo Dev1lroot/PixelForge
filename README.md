@@ -19,7 +19,7 @@ cmake --build build -j
 ./build/pixelforge [images...]
 ```
 
-Install system-wide (binary + desktop entry): `sudo cmake --install build`.
+Install system-wide (binary, plugins, desktop entry): `sudo cmake --install build`.
 
 Headless end-to-end test (drives the real tools with synthetic input, optional
 screenshots):
@@ -83,6 +83,72 @@ Sharpen, Soften Portrait, Vignette), Render (Clouds, Julia, Mandelbrot), Stylize
 .ora; save .ora (layers, blend modes, opacity) or flattened PNG/JPEG/BMP/TIFF/WebP
 with a quality dialog; drag & drop; print.
 
+## Texture-artist features
+
+**Tile Preview** (*View → Tile Preview*, Ctrl+Shift+T, toolbar button) — the image
+is repeated in a 3×3 block around the canvas. Painting wraps: brush, eraser, pencil,
+clone stamp, recolor, shapes, lines and text crossing an edge continue on the
+opposite side, and you can paint directly on the neighbouring copies. Click tools
+(bucket, color picker, magic wand, text) map neighbour clicks back into the canvas.
+
+**Normal maps** (*Effects → Maps*) — *Normal Map* from height (luminance or a single
+channel, strength, smoothing, invert, OpenGL Y+ / DirectX Y− output, seamless wrap),
+*Height Map*, *Normalize Normal Map*, *Flip Normal Green*. *Layers → Create Normal Map
+Layer...* builds a layer named `normal` from the visible image in one step.
+
+**Animation window** (*Window → Animation*, F9) — plays the image as: a vertical strip
+of stacked frames (auto-detects square frames, e.g. 16×64 → 4 frames), a horizontal
+strip, one frame per layer (optionally with the bottom layer as a fixed background
+and hidden layers skipped), or a texture scrolling vertically/horizontally with
+wrap-around. Adjustable fps, step, pixelated scaling; updates live while you paint.
+
+## Plugins
+
+Plugins are Qt shared libraries implementing `PixelForge::Plugin` from
+[`src/pluginapi.h`](src/pluginapi.h); they need only that header and Qt. They are
+loaded from `$PIXELFORGE_PLUGIN_PATH`, `<bin>/plugins`, `<prefix>/lib/pixelforge/plugins`
+and `~/.local/share/pixelforge/plugins`. *Help → Plugins...* lists what was loaded.
+
+### Example plugins (`plugins/examples`)
+
+Built by default (`-DPIXELFORGE_EXAMPLE_PLUGINS=OFF` to skip) and meant as starting
+points for your own:
+
+| Plugin | Shows how to |
+|--------|--------------|
+| `hello` | add a menu action and query the host (*Help → Say Hello...*) — the minimal plugin |
+| `histogram` | add a floating tool window (F11) that refreshes on `onDocumentChanged` |
+| `exportlayers` | read every layer's pixels, name, visibility and opacity (*File → Export Layers as PNG...*) |
+
+### Writing a plugin
+
+```cpp
+#include "pluginapi.h"
+#include <QAction>
+
+class MyPlugin : public QObject, public PixelForge::Plugin
+{
+    Q_OBJECT
+    Q_PLUGIN_METADATA(IID PixelForgePlugin_iid FILE "myplugin.json")
+    Q_INTERFACES(PixelForge::Plugin)
+public:
+    QString name() const override { return "My Plugin"; }
+    QString version() const override { return "1.0"; }
+    QString description() const override { return "Does something useful"; }
+    void initialize(PixelForge::Host *host) override
+    {
+        auto *a = new QAction("Do &Something", host->mainWindow());
+        connect(a, &QAction::triggered, [host] { /* host->flattenedImage(), host->layers() ... */ });
+        host->addMenuAction("Effects", a);
+    }
+};
+```
+
+`myplugin.json` holds `name`, `version` and `description`. Build it as a `MODULE`
+library against `Qt6::Widgets` with `src/` on the include path (see
+`pixelforge_plugin()` in `CMakeLists.txt`) and drop the `.so` into one of the plugin
+directories above.
+
 ## Source layout
 
 | File | Purpose |
@@ -96,3 +162,7 @@ with a quality dialog; drag & drop; print.
 | `src/ora.*` | OpenRaster reader/writer (minimal zip + zlib) |
 | `src/icons.*` | procedurally drawn icons and cursors |
 | `src/mainwindow.*` | menus, toolbars, options bar, image tabs, commands |
+| `src/animpanel.*` | animation preview window |
+| `src/pluginapi.h`, `src/pluginhost.*` | plugin API and loader |
+| `plugins/examples/` | example plugins (hello, histogram, export layers) |
+| `tests/selftest.cpp` | headless end-to-end test |

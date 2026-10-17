@@ -571,6 +571,88 @@ void drawIcon(QPainter &p, const QString &n)
             p.drawLine(v, 1, v, 15);
             p.drawLine(1, v, 15, v);
         }
+    } else if (n == "tile") {
+        p.setRenderHint(QPainter::Antialiasing, false);
+        for (int i = 0; i < 4; ++i) {
+            QRect r(1 + (i % 2) * 7, 1 + (i / 2) * 7, 7, 7);
+            p.fillRect(r, i == 0 ? QColor(90, 150, 230) : QColor(170, 200, 240));
+            p.setPen(QColor(40, 60, 100));
+            p.drawRect(r.adjusted(0, 0, -1, -1));
+        }
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(QPen(QColor(220, 60, 40), 1.4));
+        p.drawLine(QPointF(4, 4.5), QPointF(11, 4.5));
+        p.drawLine(QPointF(4, 11.5), QPointF(11, 11.5));
+    } else if (n == "animation") {
+        p.setPen(QPen(QColor(40, 40, 50), 0.9));
+        p.setBrush(QColor(60, 60, 70));
+        p.drawRect(QRectF(1.5, 2.5, 13, 11));
+        p.setBrush(QColor(150, 200, 250));
+        p.drawRect(QRectF(4.5, 4.5, 7, 7));
+        p.setPen(Qt::NoPen);
+        p.setBrush(Qt::white);
+        for (int i = 0; i < 4; ++i) {
+            p.drawRect(QRectF(2.3, 3.3 + i * 2.6, 1.4, 1.4));
+            p.drawRect(QRectF(12.3, 3.3 + i * 2.6, 1.4, 1.4));
+        }
+        p.setBrush(QColor(30, 90, 200));
+        QPolygonF t;
+        t << QPointF(6.5, 5.8) << QPointF(10, 8) << QPointF(6.5, 10.2);
+        p.drawPolygon(t);
+    } else if (n == "play" || n == "pause" || n == "stepback" || n == "stepfwd") {
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(30, 90, 200));
+        if (n == "play") {
+            QPolygonF t;
+            t << QPointF(4, 2.5) << QPointF(13.5, 8) << QPointF(4, 13.5);
+            p.drawPolygon(t);
+        } else if (n == "pause") {
+            p.drawRect(QRectF(4, 3, 3, 10));
+            p.drawRect(QRectF(9, 3, 3, 10));
+        } else {
+            p.save();
+            if (n == "stepback") {
+                p.translate(16, 0);
+                p.scale(-1, 1);
+            }
+            QPolygonF t;
+            t << QPointF(3, 3) << QPointF(10, 8) << QPointF(3, 13);
+            p.drawPolygon(t);
+            p.drawRect(QRectF(11, 3, 2.2, 10));
+            p.restore();
+        }
+    } else if (n == "cube") {
+        QPolygonF top, left, right;
+        top << QPointF(8, 1.5) << QPointF(14, 4.5) << QPointF(8, 7.5) << QPointF(2, 4.5);
+        left << QPointF(2, 4.5) << QPointF(8, 7.5) << QPointF(8, 14.5) << QPointF(2, 11.5);
+        right << QPointF(8, 7.5) << QPointF(14, 4.5) << QPointF(14, 11.5) << QPointF(8, 14.5);
+        p.setPen(QPen(QColor(30, 50, 30), 0.8));
+        p.setBrush(QColor(120, 200, 90));
+        p.drawPolygon(top);
+        p.setBrush(QColor(150, 105, 60));
+        p.drawPolygon(left);
+        p.setBrush(QColor(110, 75, 40));
+        p.drawPolygon(right);
+    } else if (n == "normalmap" || n == "fx_maps") {
+        QLinearGradient g(0, 0, 16, 16);
+        g.setColorAt(0, QColor(90, 120, 255));
+        g.setColorAt(0.5, QColor(128, 128, 255));
+        g.setColorAt(1, QColor(190, 140, 230));
+        p.setPen(QPen(QColor(40, 40, 110), 0.9));
+        p.setBrush(g);
+        p.drawRoundedRect(QRectF(1.5, 1.5, 13, 13), 2, 2);
+        p.setPen(QPen(QColor(255, 255, 255, 200), 1.2));
+        p.drawLine(QPointF(8, 11), QPointF(8, 4));
+        p.drawLine(QPointF(8, 4), QPointF(6, 6));
+        p.drawLine(QPointF(8, 4), QPointF(10, 6));
+    } else if (n == "plugin") {
+        p.setPen(QPen(QColor(40, 90, 40), 0.9));
+        p.setBrush(QColor(110, 190, 90));
+        QPainterPath pc;
+        pc.addRoundedRect(QRectF(2, 5, 9, 9), 1.5, 1.5);
+        pc.addEllipse(QRectF(4.5, 1.5, 4, 4));
+        pc.addEllipse(QRectF(9.5, 7.5, 4, 4));
+        p.drawPath(pc.simplified());
     } else if (n == "rulers") {
         p.setRenderHint(QPainter::Antialiasing, false);
         p.setPen(QColor(120, 90, 30));

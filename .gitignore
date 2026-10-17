@@ -5,3 +5,6 @@ ref*.png
 ref*.jpg
 ref*.webp
 .cache/
+# only the example plugins are published; other plugins/<name>/ folders are local
+/plugins/*
+!/plugins/examples/

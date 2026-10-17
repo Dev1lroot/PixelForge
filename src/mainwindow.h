@@ -109,6 +109,11 @@ public:
     void addDocument(Document *doc, bool fit = true);
     void showLayerProperties();
     QAction *action(const QString &id) const { return m_actions.value(id); }
+    // adds a floating tool window with a Window-menu toggle (also used by plugins)
+    FloatingPanel *addFloatingPanel(const QString &id, const QString &title, QWidget *content, const QKeySequence &ks,
+                                    const QIcon &icon, bool defaultVisible, const QSize &size);
+    void addPluginAction(const QString &menu, QAction *action);
+    class AnimationPanel *animationPanel() const { return m_animPanel; }
 
 protected:
     void closeEvent(QCloseEvent *e) override;
@@ -138,6 +143,9 @@ private:
     void updateStatus();
     void updateZoomCombo();
     void layoutPanels(bool initial);
+    void registerPanel(FloatingPanel *w, const QString &id, const QString &name, const QKeySequence &ks,
+                       const QIcon &icon, bool defaultVisible);
+    void showPlugins();
     QString formatLength(double px) const;
 
     // file
@@ -195,6 +203,7 @@ private:
     void layerFlipH();
     void layerFlipV();
     void layerRotateZoom();
+    void layerCreateNormalMap();
     void layerMoveUp();
     void layerMoveDown();
 
@@ -226,6 +235,12 @@ private:
     LayersPanel *m_layersPanel;
     ImageTabs *m_tabs;
     bool m_panelsPlaced = false;
+    QVector<FloatingPanel *> m_panels;
+    QStringList m_panelIds;
+    QAction *m_panelSeparator = nullptr;
+    class AnimationPanel *m_animPanel = nullptr;
+    class PluginHost *m_pluginHost = nullptr;
+    QHash<QString, QMenu *> m_menus;
 
     QHash<QString, QAction *> m_actions;
     QMenu *m_menuAdjust = nullptr, *m_menuEffects = nullptr;

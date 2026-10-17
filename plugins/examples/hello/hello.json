@@ -1,0 +1,5 @@
+{
+    "name": "Hello",
+    "version": "1.0",
+    "description": "Minimal example plugin: a Help menu entry that shows document info"
+}

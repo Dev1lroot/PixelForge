@@ -70,6 +70,10 @@ public:
     // top history item just drop it, others finalise first
     virtual void prepareForHistory() { commit(); }
     virtual bool isEditing() const { return false; }
+    // how pointer positions are delivered in tile view: raw (may lie on a neighbour tile),
+    // or wrapped back into the canvas for click-to-sample tools
+    enum TileBehavior { TileRaw, TileWrap };
+    virtual TileBehavior tileBehavior() const { return TileRaw; }
     virtual bool wantsKeys() const { return false; }
 
     virtual void mousePress(CanvasView *, const ToolEvent &) {}
@@ -97,6 +101,7 @@ QVector<Tool *> createTools(MainWindow *main);
 // helpers shared with menu commands
 QImage floodMask(const QImage &src, QPoint seed, int tolerancePct, bool global, const QImage *limitMask = nullptr);
 QPainterPath maskToPath(const QImage &mask);
+QVector<QPointF> tileOffsets(const Document *d, const ToolSettings &s);
 QPainterPath combineSelection(const QPainterPath &oldSel, bool hadSel, const QPainterPath &newPath, int mode);
 
 // Interface the Move Selected Pixels tool exposes for paste
