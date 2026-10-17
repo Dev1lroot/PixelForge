@@ -1,0 +1,7 @@
+build/
+compile_commands.json
+# reference screenshots of other software (not part of the project)
+ref*.png
+ref*.jpg
+ref*.webp
+.cache/
