@@ -5,6 +5,8 @@ Paint.NET 3.x workflow: floating translucent tool windows, the two-row toolbar w
 a context-sensitive tool options bar, image thumbnails in the top-right corner,
 layers with blend modes, unlimited history, adjustments and effects with live preview.
 
+![PixelForge editing a layered image, with the Histogram example plugin docked on the right](docs/screenshot.png)
+
 Only the UI and behaviour are modelled. No proprietary file formats, code or artwork
 are used: all icons are drawn procedurally at runtime, and layered documents are
 stored as **OpenRaster (.ora)**, the open format shared with GIMP, Krita and MyPaint.
