@@ -10,6 +10,7 @@ struct MaterialTextures {
     QImage base;                  // Format_ARGB32 or null (then the material colour is used)
     QImage normal;                // tangent-space, OpenGL convention (green = +V), or null
     QColor color = Qt::white;
+    bool hidden = false;          // the material's triangles are not drawn
 };
 
 struct RenderParams {

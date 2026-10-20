@@ -116,3 +116,15 @@ void PluginHost::addMenuAction(const QString &menu, QAction *action)
 }
 
 QWidget *PluginHost::mainWindow() const { return m_main; }
+
+void PluginHost::addCanvasOverlay(QObject *context, std::function<void(QPainter &, const QTransform &)> paint)
+{
+    m_main->addCanvasOverlay(context, std::move(paint));
+}
+
+void PluginHost::updateCanvas() { m_main->updateCanvases(); }
+
+void PluginHost::setFloodRegions(QObject *context, std::function<QImage(const QSize &)> regions)
+{
+    m_main->setFloodRegions(context, std::move(regions));
+}

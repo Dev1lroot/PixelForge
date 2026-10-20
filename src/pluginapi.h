@@ -7,11 +7,13 @@
 #include <QImage>
 #include <QKeySequence>
 #include <QString>
+#include <QTransform>
 #include <QVector>
 #include <functional>
 
 class QAction;
 class QObject;
+class QPainter;
 class QWidget;
 
 namespace PixelForge {
@@ -48,6 +50,18 @@ public:
     // "Adjustments", "Effects", "Window" or "Help".
     virtual void addMenuAction(const QString &menu, QAction *action) = 0;
     virtual QWidget *mainWindow() const = 0;
+
+    // Draws over the image on the canvas (after the pixels and pixel grid, below the selection), e.g.
+    // guides or a UV layout. `paint` gets a painter in view coordinates and the transform from image
+    // pixels to the view. The overlay lives as long as `context`; call updateCanvas() when it changes.
+    virtual void addCanvasOverlay(QObject *context, std::function<void(QPainter &, const QTransform &)> paint) = 0;
+    virtual void updateCanvas() = 0;
+
+    // Regions for the "UV Map" flood mode of the Magic Wand and Paint Bucket. `regions` returns an image
+    // of the requested (document) size whose RGB value labels each pixel: pixels sharing a non-zero label
+    // form one region taken as a whole, 0 marks the space between regions, flooded contiguously. Return
+    // a null image when there is nothing to offer. One provider at a time; it lives as long as `context`.
+    virtual void setFloodRegions(QObject *context, std::function<QImage(const QSize &)> regions) = 0;
 };
 
 class Plugin

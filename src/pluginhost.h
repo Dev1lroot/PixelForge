@@ -38,6 +38,9 @@ public:
                       const QIcon &icon) override;
     void addMenuAction(const QString &menu, QAction *action) override;
     QWidget *mainWindow() const override;
+    void addCanvasOverlay(QObject *context, std::function<void(QPainter &, const QTransform &)> paint) override;
+    void updateCanvas() override;
+    void setFloodRegions(QObject *context, std::function<QImage(const QSize &)> regions) override;
 
 signals:
     void documentChanged();

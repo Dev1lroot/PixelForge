@@ -558,6 +558,21 @@ void drawIcon(QPainter &p, const QString &n)
     } else if (n == "fill") {
         p.fillRect(QRectF(2, 2, 12, 12), QColor(60, 120, 220));
         dashedRect(p, QRectF(1.5, 1.5, 13, 13));
+    } else if (n == "uvfill") {
+        // a UV layout: two islands, one of them filled
+        p.fillRect(QRectF(1.5, 1.5, 13, 13), Qt::white);
+        QPolygonF a, b;
+        a << QPointF(2.5, 3) << QPointF(8.5, 2.5) << QPointF(6, 9) << QPointF(2.5, 8);
+        b << QPointF(8, 8) << QPointF(13.5, 6) << QPointF(13, 13.5) << QPointF(7, 13);
+        p.setPen(QPen(QColor(30, 120, 200), 0.9));
+        p.setBrush(QColor(60, 120, 220));
+        p.drawPolygon(a);
+        p.drawLine(a[0], a[2]);
+        p.setBrush(Qt::NoBrush);
+        p.drawPolygon(b);
+        p.drawLine(b[0], b[2]);
+        p.setPen(QPen(QColor(90, 90, 100), 0.8));
+        p.drawRect(QRectF(1.5, 1.5, 13, 13));
     } else if (n == "undo") {
         curvedArrow(p, true, QColor(30, 90, 200));
     } else if (n == "redo") {

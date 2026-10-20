@@ -109,14 +109,36 @@ and hidden layers skipped), or a texture scrolling vertically/horizontally with
 wrap-around. Adjustable fps, step, pixelated scaling; updates live while you paint.
 
 **3D Model Preview** (*Window → 3D Model Preview*, F12) — open (or drop) an OBJ (+MTL),
-glTF 2.0 (.gltf/.glb), STL or PLY model and see the current image mapped onto it through
+FBX (binary 7.x or ASCII, embedded textures included), glTF 2.0 (.gltf/.glb), STL or PLY model and see the current image mapped onto it through
 the model's UVs, updating live while you paint. Every material of the model is a texture
 slot with a *Color* and a *Normal* combobox: pick the whole image, any layer (hidden layers
-work too), the model's own texture, or nothing. Layers named after a material
-(`Body`, `body normal`, `Body_n`) and a lone `normal` layer are assigned automatically.
+work too), the material's own colour or texture, or *(none)*. Materials start as *(none)*,
+which hides them completely (not drawn, no UVs), so only what you assign is shown. Layers
+named after a material (`Body`, `body normal`, `Body_n`) and a lone `normal` layer are
+assigned automatically.
 Drag to orbit, right/middle-drag to pan, wheel to zoom, double-click to reset; toggles for
-pixelated sampling, lighting, normal maps, two-sided faces, wireframe and auto-rotate.
-The model file is watched and reloads when it is re-exported. Software-rendered, so it needs
+pixelated sampling, lighting, normal maps, two-sided faces, wireframe and auto-rotate. Drag the
+handle between the 3D view and the options to give either more room.
+*UVs on canvas* draws the model's UV layout over the image in the editor (like the pixel grid,
+with an opacity slider): a material bound to the whole image always shows its UVs, one bound to
+a layer only while that layer is the active one, so you see exactly the UVs you are painting.
+Models with several UV maps (glTF `TEXCOORD_n`, FBX UV layers) get a *UV map* selector that
+switches both the preview and the overlay.
+The Magic Wand and Paint Bucket get a third **Flood Mode: UV Map**: click inside a UV island to
+select or fill that whole island, or between islands to take the connected gap space around
+them (tolerance is not used). It works on the islands of the materials whose UVs the overlay
+would show: bound to the whole image, or to the active layer.
+The model file is watched and reloads when it is re-exported.
+
+Other formats are converted on open, in the background: if **assimp**, **FBX2glTF** or
+**Blender** is installed, the file is turned into a binary glTF and loaded as usual (tools are
+tried in that order until one succeeds; FBX files the built-in reader can't handle fall back
+to them too). Blender adds `.blend`, USD (`.usd/.usda/.usdc/.usdz`), Alembic (`.abc`),
+`.3ds`, X3D/VRML and DXF where its importers are available; assimp adds DAE, 3DS, X, LWO,
+MS3D, MD2/MD3/MD5, OFF, 3MF, IFC and many more. Conversions are cached in
+`~/.cache/pixelforge/modelview` by file path and modification time (newest 32 kept), so
+reopening is instant. `PIXELFORGE_BLENDER`, `PIXELFORGE_ASSIMP` and `PIXELFORGE_FBX2GLTF`
+point at tools outside `$PATH`. Software-rendered, so it needs
 no GPU drivers; `-DPIXELFORGE_MODELVIEW=OFF` skips it.
 
 ## Plugins
@@ -161,6 +183,11 @@ public:
 };
 ```
 
+Plugins can also draw over the image with `host->addCanvasOverlay(context, paint)`; `paint`
+receives a painter in view coordinates and the image-to-view transform (call
+`host->updateCanvas()` when the overlay changes), and offer regions for the UV Map flood mode
+with `host->setFloodRegions(context, regions)`.
+
 `myplugin.json` holds `name`, `version` and `description`. Build it as a `MODULE`
 library against `Qt6::Widgets` with `src/` on the include path (see
 `pixelforge_plugin()` in `CMakeLists.txt`) and drop the `.so` into one of the plugin
@@ -182,7 +209,7 @@ directories above.
 | `src/animpanel.*` | animation preview window |
 | `src/pluginapi.h`, `src/pluginhost.*` | plugin API and loader |
 | `plugins/examples/` | example plugins (hello, histogram, export layers) |
-| `plugins/modelview/` | 3D model preview plugin: model loaders (`meshio`), software rasterizer (`meshrender`), window |
+| `plugins/modelview/` | 3D model preview plugin: model loaders (`meshio`), converter middleware (`convert`), software rasterizer (`meshrender`), window |
 | `tests/selftest.cpp` | headless end-to-end test |
 
 ## License

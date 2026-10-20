@@ -303,6 +303,23 @@ static QRect strokeBounds(const QPointF &a, const QPointF &b, qreal width)
     return QRectF(a, b).normalized().adjusted(-pad, -pad, pad, pad).toAlignedRect();
 }
 
+QImage Tool::floodRegion(const QImage &src, QPoint seed, const QImage *limitMask) const
+{
+    const ToolSettings &s = settings();
+    if (s.floodMode != FloodMode::UVMap)
+        return floodMask(src, seed, s.tolerance, s.floodMode == FloodMode::Global, limitMask);
+    // UV Map: a plugin labels each pixel with its UV island (0 = the space between islands). Inside an
+    // island the whole island is taken; in a gap, the gap area connected to the click.
+    const QImage labels = main->floodRegions(src.size());
+    if (labels.isNull()) {
+        setStatus(QObject::tr("UV Map flood mode: open a model with UVs in the 3D Model Preview and assign the image "
+                              "or this layer to one of its materials."));
+        return QImage();
+    }
+    const bool island = (labels.pixel(seed) & 0xFFFFFF) != 0;
+    return floodMask(labels, seed, 0, island, limitMask);
+}
+
 // ============================================================ selection tools
 
 class SelectToolBase : public Tool
@@ -496,7 +513,9 @@ public:
         QPoint pt(int(std::floor(e.pos.x())), int(std::floor(e.pos.y())));
         if (!d->rect().contains(pt))
             return;
-        QImage mask = floodMask(d->activeImage(), pt, settings().tolerance, settings().globalFill);
+        QImage mask = floodRegion(d->activeImage(), pt);
+        if (mask.isNull())
+            return;
         QPainterPath shape = maskToPath(mask);
         int mode = modeFromEvent(e, settings().selectionMode);
         d->setSelection(combineSelection(d->selection(), d->hasSelection(), shape, mode));
@@ -1028,7 +1047,9 @@ public:
         if (d->hasSelection() && !d->selection().contains(QPointF(pt) + QPointF(0.5, 0.5)))
             return;
         const QImage *limit = d->hasSelection() ? &d->selectionMask() : nullptr;
-        QImage mask = floodMask(d->activeImage(), pt, settings().tolerance, settings().globalFill, limit);
+        QImage mask = floodRegion(d->activeImage(), pt, limit);
+        if (mask.isNull())
+            return;
         bool right = e.button == Qt::RightButton;
         QColor fg = right ? colors().secondary : colors().primary;
         QColor bg = right ? colors().primary : colors().secondary;

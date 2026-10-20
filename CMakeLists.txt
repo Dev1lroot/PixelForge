@@ -42,8 +42,10 @@ endif()
 # 3D model preview (bundled plugin)
 option(PIXELFORGE_MODELVIEW "Build the 3D model preview plugin in plugins/modelview" ON)
 if(PIXELFORGE_MODELVIEW)
-  set(MODELVIEW_CORE plugins/modelview/meshio.cpp plugins/modelview/meshrender.cpp)
+  set(MODELVIEW_CORE plugins/modelview/meshio.cpp plugins/modelview/meshrender.cpp plugins/modelview/convert.cpp
+      plugins/modelview/convert.h)
   pixelforge_plugin(modelview ${MODELVIEW_CORE} plugins/modelview/modelview.cpp plugins/modelview/modelview.h)
+  target_link_libraries(modelview PRIVATE ZLIB::ZLIB)               # compressed FBX arrays
 endif()
 
 option(PIXELFORGE_TESTS "Build the headless self-test" ON)

@@ -2,6 +2,9 @@
 
 #include <QMainWindow>
 #include <QHash>
+#include <QPointer>
+#include <QTransform>
+#include <functional>
 #include <QVariantMap>
 #include "settings.h"
 #include "tools.h"
@@ -113,6 +116,13 @@ public:
     FloatingPanel *addFloatingPanel(const QString &id, const QString &title, QWidget *content, const QKeySequence &ks,
                                     const QIcon &icon, bool defaultVisible, const QSize &size);
     void addPluginAction(const QString &menu, QAction *action);
+    // plugin drawing over the image, see PixelForge::Host::addCanvasOverlay
+    void addCanvasOverlay(QObject *context, std::function<void(QPainter &, const QTransform &)> paint);
+    void paintCanvasOverlays(QPainter &p, const QTransform &imageToView);
+    void updateCanvases();
+    // region labels for the UV Map flood mode, see PixelForge::Host::setFloodRegions
+    void setFloodRegions(QObject *context, std::function<QImage(const QSize &)> regions);
+    QImage floodRegions(const QSize &size) const;
     class AnimationPanel *animationPanel() const { return m_animPanel; }
 
 protected:
@@ -224,6 +234,13 @@ private:
 
     QVector<Document *> m_docs;
     QVector<CanvasView *> m_views;
+    struct CanvasOverlay {
+        QPointer<QObject> context;
+        std::function<void(QPainter &, const QTransform &)> paint;
+    };
+    QVector<CanvasOverlay> m_canvasOverlays;
+    QPointer<QObject> m_floodRegionContext;
+    std::function<QImage(const QSize &)> m_floodRegions;
     int m_current = -1;
 
     Workspace *m_workspace;

@@ -688,11 +688,18 @@ QToolBar *MainWindow::createOptionsBar()
     {
         auto *m = new QMenu(m_floodButton);
         connect(m->addAction(Icons::get("bucket"), tr("Contiguous")), &QAction::triggered, this, [this] {
-            m_settings.globalFill = false;
+            m_settings.floodMode = FloodMode::Contiguous;
             m_settings.notify();
         });
         connect(m->addAction(Icons::get("fill"), tr("Global")), &QAction::triggered, this, [this] {
-            m_settings.globalFill = true;
+            m_settings.floodMode = FloodMode::Global;
+            m_settings.notify();
+        });
+        QAction *uv = m->addAction(Icons::get("uvfill"), tr("UV Map"));
+        uv->setToolTip(tr("Fill or select a whole UV island, or the gap between islands, of the model in the "
+                          "3D Model Preview"));
+        connect(uv, &QAction::triggered, this, [this] {
+            m_settings.floodMode = FloodMode::UVMap;
             m_settings.notify();
         });
         m_floodButton->setMenu(m);
@@ -1457,8 +1464,10 @@ void MainWindow::updateOptionsBar()
     m_blendButton->setToolTip(s.alphaBlend ? tr("Normal Blending") : tr("Overwrite"));
     static const char *selIcons[] = {"selreplace", "selunion", "selexclude", "selintersect", "selxor"};
     m_selModeButton->setIcon(Icons::get(selIcons[int(s.selectionMode)]));
-    m_floodButton->setIcon(Icons::get(s.globalFill ? "fill" : "bucket"));
-    m_floodButton->setToolTip(s.globalFill ? tr("Global") : tr("Contiguous"));
+    static const char *floodIcons[] = {"bucket", "fill", "uvfill"};
+    const QString floodNames[] = {tr("Contiguous"), tr("Global"), tr("UV Map")};
+    m_floodButton->setIcon(Icons::get(floodIcons[int(s.floodMode)]));
+    m_floodButton->setToolTip(floodNames[int(s.floodMode)]);
     static const char *shapeIcons[] = {"shapeoutline", "shapefill", "shapeboth"};
     m_shapeButton->setIcon(Icons::get(shapeIcons[int(s.shapeType)]));
     m_tolerance->setValue(s.tolerance);
@@ -2476,6 +2485,46 @@ void MainWindow::addPluginAction(const QString &menu, QAction *action)
     else
         m->addAction(action);
     addAction(action);
+}
+
+void MainWindow::addCanvasOverlay(QObject *context, std::function<void(QPainter &, const QTransform &)> paint)
+{
+    // overlays whose context is gone are skipped while painting and pruned here (not from destroyed(),
+    // which can fire while the window itself is being torn down)
+    m_canvasOverlays.removeIf([](const CanvasOverlay &o) { return o.context.isNull(); });
+    m_canvasOverlays.append({context, std::move(paint)});
+    updateCanvases();
+}
+
+void MainWindow::paintCanvasOverlays(QPainter &p, const QTransform &imageToView)
+{
+    for (const CanvasOverlay &o : m_canvasOverlays) {
+        if (o.context.isNull())
+            continue;
+        p.save();
+        o.paint(p, imageToView);
+        p.restore();
+    }
+}
+
+void MainWindow::setFloodRegions(QObject *context, std::function<QImage(const QSize &)> regions)
+{
+    m_floodRegionContext = context;
+    m_floodRegions = std::move(regions);
+}
+
+QImage MainWindow::floodRegions(const QSize &size) const
+{
+    if (m_floodRegionContext.isNull() || !m_floodRegions)
+        return QImage();
+    const QImage img = m_floodRegions(size);
+    return img.size() == size ? img.convertToFormat(QImage::Format_ARGB32) : QImage();
+}
+
+void MainWindow::updateCanvases()
+{
+    for (CanvasView *v : m_views)
+        v->viewport()->update();
 }
 
 void MainWindow::showPlugins()

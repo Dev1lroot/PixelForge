@@ -92,6 +92,8 @@ protected:
     ToolSettings &settings() const;
     ColorState &colors() const;
     void setStatus(const QString &s) const;
+    // flood region at `seed` for the current flood mode; null (with a status hint) if there is none
+    QImage floodRegion(const QImage &src, QPoint seed, const QImage *limitMask = nullptr) const;
 
     MainWindow *main;
     bool m_hooked = false;                   // live-update signal hooks installed

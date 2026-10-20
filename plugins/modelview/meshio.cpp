@@ -14,6 +14,7 @@
 #include <QUrl>
 #include <QtEndian>
 #include <cmath>
+#include <zlib.h>
 #include <cstring>
 #include <unordered_map>
 
@@ -29,6 +30,34 @@ struct Builder {
     QVector<int> weld;                        // per vertex: id of the vertices sharing its position, for normals
     QVector<bool> needsNormal;
     bool hasUV = false;
+    QStringList uvNames;                      // channel 0 lives in Vertex::u/v, the others in extraUV
+    QVector<QVector<QVector2D>> extraUV;
+
+    // UV map by name, created on first use
+    int uvChannel(const QString &name)
+    {
+        int i = int(uvNames.indexOf(name));
+        if (i < 0) {
+            uvNames << name;
+            i = int(uvNames.size() - 1);
+        }
+        return i;
+    }
+    void setUV(int channel, quint32 vertex, float u, float v)
+    {
+        hasUV = true;
+        if (channel == 0) {
+            vertices[vertex].u = u;
+            vertices[vertex].v = v;
+            return;
+        }
+        while (extraUV.size() < channel)
+            extraUV.append(QVector<QVector2D>());
+        QVector<QVector2D> &c = extraUV[channel - 1];
+        if (c.size() <= qsizetype(vertex))
+            c.resize(vertices.size());
+        c[vertex] = QVector2D(u, v);
+    }
 
     int material(const QString &name)
     {
@@ -73,6 +102,21 @@ struct Builder {
                     vertices[i].normal = acc.value(weld[i]).normalized();
         }
         m.vertices = vertices;
+        if (hasUV) {
+            m.uvSets = uvNames;
+            while (m.uvSets.size() < 1 + extraUV.size())
+                m.uvSets << QStringLiteral("UV %1").arg(m.uvSets.size() + 1);
+            if (m.uvSets.first().isEmpty())
+                m.uvSets.first() = QStringLiteral("UVMap");
+            QVector<QVector2D> first(vertices.size());
+            for (int i = 0; i < vertices.size(); ++i)
+                first[i] = QVector2D(vertices[i].u, vertices[i].v);
+            m.uvData << first;
+            for (QVector<QVector2D> c : extraUV) {
+                c.resize(vertices.size());
+                m.uvData << c;
+            }
+        }
         for (int i = 0; i < tris.size(); ++i) {
             if (tris[i].isEmpty())
                 continue;
@@ -365,6 +409,15 @@ void gltfMesh(const Gltf &g, int meshIndex, const QMatrix4x4 &xf, Builder &b, QH
         const QVector<float> pos = g.accessor(attr["POSITION"].toInt(), &pc);
         const QVector<float> nrm = attr.contains("NORMAL") ? g.accessor(attr["NORMAL"].toInt(), &nc) : QVector<float>();
         const QVector<float> uv = attr.contains("TEXCOORD_0") ? g.accessor(attr["TEXCOORD_0"].toInt(), &tc) : QVector<float>();
+        QVector<QPair<int, QVector<float>>> extraUv;               // TEXCOORD_1.. : (channel, data)
+        if (!uv.isEmpty())
+            b.uvChannel(QStringLiteral("UV 1"));
+        for (int set = 1; attr.contains(QStringLiteral("TEXCOORD_%1").arg(set)); ++set) {
+            int c = 0;
+            const QVector<float> data = g.accessor(attr[QStringLiteral("TEXCOORD_%1").arg(set)].toInt(), &c);
+            if (c >= 2)
+                extraUv.append({b.uvChannel(QStringLiteral("UV %1").arg(set + 1)), data});
+        }
         if (pc < 3)
             continue;
         const int count = int(pos.size() / pc);
@@ -402,7 +455,10 @@ void gltfMesh(const Gltf &g, int meshIndex, const QMatrix4x4 &xf, Builder &b, QH
                 v.u = uv[i * tc];
                 v.v = 1.0f - uv[i * tc + 1];                       // glTF UVs start at the top-left
             }
-            b.add(v, -1, !hasNormals);
+            const quint32 vi = b.add(v, -1, !hasNormals);
+            for (const auto &[channel, data] : extraUv)
+                if (qsizetype(i) * 2 + 1 < data.size())
+                    b.setUV(channel, vi, data[i * 2], 1.0f - data[i * 2 + 1]);
         }
 
         QVector<quint32> idx;
@@ -737,14 +793,624 @@ bool loadPly(const QString &path, Builder &b, QString *error)
     return ok || !b.tris[mat].isEmpty() ? true : fail(QObject::tr("Truncated PLY file"));
 }
 
+// ---------------------------------------------------------------- FBX (binary 7.x and ASCII 6/7)
+
+struct FbxProp {
+    char type = 0;                // binary type code; ASCII: 'S' string, 'D' number, 'L' integer
+    double num = 0;
+    qint64 i = 0;
+    QByteArray str;               // strings and raw data
+    QVector<double> arr;
+
+    bool numeric() const { return type != 'S' && type != 'R' && arr.isEmpty(); }
+};
+
+struct FbxNode {
+    QByteArray name;
+    QVector<FbxProp> props;
+    QVector<FbxNode> children;
+
+    const FbxNode *child(const char *n) const
+    {
+        for (const FbxNode &c : children)
+            if (c.name == n)
+                return &c;
+        return nullptr;
+    }
+    QByteArray string(const char *n) const
+    {
+        const FbxNode *c = child(n);
+        return c && !c->props.isEmpty() ? c->props[0].str : QByteArray();
+    }
+    // a child's numbers: the array property (binary, ASCII "*N { a: }") or its plain numeric values
+    QVector<double> numbers(const char *n) const
+    {
+        const FbxNode *c = child(n);
+        QVector<double> out;
+        if (!c)
+            return out;
+        for (const FbxProp &p : c->props) {
+            if (!p.arr.isEmpty())
+                return p.arr;
+            if (p.numeric())
+                out.append(p.num);
+        }
+        return out;
+    }
+    // object key: 64-bit id (FBX 7) or the "Class::Name" string (FBX 6)
+    QByteArray key() const
+    {
+        if (props.isEmpty())
+            return QByteArray();
+        return props[0].type == 'S' ? props[0].str : QByteArray::number(props[0].i);
+    }
+};
+
+// ---- binary
+
+bool fbxBinaryNode(const QByteArray &d, qsizetype &at, bool wide, FbxNode &out, bool &end)
+{
+    const qsizetype head = wide ? 25 : 13;
+    if (at + head > d.size())
+        return false;
+    const char *p = d.constData() + at;
+    const quint64 endOffset = wide ? qFromLittleEndian<quint64>(p) : qFromLittleEndian<quint32>(p);
+    const quint64 numProps = wide ? qFromLittleEndian<quint64>(p + 8) : qFromLittleEndian<quint32>(p + 4);
+    const int nameLen = uchar(p[wide ? 24 : 12]);
+    end = endOffset == 0;
+    if (end) {
+        at += head;
+        return true;
+    }
+    if (endOffset > quint64(d.size()) || at + head + nameLen > d.size())
+        return false;
+    out.name = d.mid(at + head, nameLen);
+    at += head + nameLen;
+    for (quint64 i = 0; i < numProps; ++i) {
+        if (at >= d.size())
+            return false;
+        FbxProp prop;
+        prop.type = d[at++];
+        auto need = [&](qsizetype n) { return at + n <= d.size(); };
+        const char *q = d.constData() + at;
+        switch (prop.type) {
+        case 'Y': if (!need(2)) return false; prop.i = qFromLittleEndian<qint16>(q); at += 2; break;
+        case 'C': if (!need(1)) return false; prop.i = q[0] != 0; at += 1; break;
+        case 'I': if (!need(4)) return false; prop.i = qFromLittleEndian<qint32>(q); at += 4; break;
+        case 'L': if (!need(8)) return false; prop.i = qFromLittleEndian<qint64>(q); at += 8; break;
+        case 'F': {
+            if (!need(4)) return false;
+            quint32 bits = qFromLittleEndian<quint32>(q);
+            float f;
+            std::memcpy(&f, &bits, 4);
+            prop.num = f;
+            at += 4;
+            break;
+        }
+        case 'D': {
+            if (!need(8)) return false;
+            quint64 bits = qFromLittleEndian<quint64>(q);
+            std::memcpy(&prop.num, &bits, 8);
+            at += 8;
+            break;
+        }
+        case 'S':
+        case 'R': {
+            if (!need(4)) return false;
+            const quint32 len = qFromLittleEndian<quint32>(q);
+            if (!need(4 + qsizetype(len))) return false;
+            prop.str = d.mid(at + 4, len);
+            at += 4 + qsizetype(len);
+            break;
+        }
+        case 'f': case 'd': case 'i': case 'l': case 'b': {
+            if (!need(12)) return false;
+            const quint32 count = qFromLittleEndian<quint32>(q);
+            const quint32 encoding = qFromLittleEndian<quint32>(q + 4);
+            const quint32 clen = qFromLittleEndian<quint32>(q + 8);
+            if (!need(12 + qsizetype(clen))) return false;
+            const int esize = prop.type == 'b' ? 1 : (prop.type == 'f' || prop.type == 'i') ? 4 : 8;
+            QByteArray raw;
+            if (encoding == 1) {
+                raw.resize(qsizetype(count) * esize);
+                uLongf rlen = uLongf(raw.size());
+                if (uncompress(reinterpret_cast<Bytef *>(raw.data()), &rlen, reinterpret_cast<const Bytef *>(q + 12), clen) != Z_OK ||
+                    rlen != uLongf(raw.size()))
+                    return false;
+            } else {
+                raw = d.mid(at + 12, clen);
+                if (raw.size() < qsizetype(count) * esize)
+                    return false;
+            }
+            at += 12 + qsizetype(clen);
+            prop.arr.resize(count);
+            const char *r = raw.constData();
+            for (quint32 k = 0; k < count; ++k) {
+                const char *e = r + qsizetype(k) * esize;
+                switch (prop.type) {
+                case 'b': prop.arr[k] = e[0] != 0; break;
+                case 'i': prop.arr[k] = qFromLittleEndian<qint32>(e); break;
+                case 'l': prop.arr[k] = double(qFromLittleEndian<qint64>(e)); break;
+                case 'f': { quint32 bits = qFromLittleEndian<quint32>(e); float f; std::memcpy(&f, &bits, 4); prop.arr[k] = f; break; }
+                default: { quint64 bits = qFromLittleEndian<quint64>(e); double v; std::memcpy(&v, &bits, 8); prop.arr[k] = v; }
+                }
+            }
+            break;
+        }
+        default:
+            return false;
+        }
+        if (prop.type == 'Y' || prop.type == 'C' || prop.type == 'I' || prop.type == 'L')
+            prop.num = double(prop.i);
+        else if (prop.type == 'F' || prop.type == 'D')
+            prop.i = qint64(prop.num);
+        out.props.append(prop);
+    }
+    while (at < qsizetype(endOffset)) {
+        FbxNode c;
+        bool childEnd = false;
+        if (!fbxBinaryNode(d, at, wide, c, childEnd))
+            return false;
+        if (childEnd)
+            break;
+        out.children.append(std::move(c));
+    }
+    at = qsizetype(endOffset);
+    return true;
+}
+
+bool fbxParseBinary(const QByteArray &d, FbxNode &root)
+{
+    if (d.size() < 27)
+        return false;
+    const quint32 version = qFromLittleEndian<quint32>(d.constData() + 23);
+    qsizetype at = 27;
+    for (;;) {
+        FbxNode n;
+        bool end = false;
+        if (!fbxBinaryNode(d, at, version >= 7500, n, end))
+            return !root.children.isEmpty();          // tolerate trailing footer data
+        if (end)
+            return true;
+        root.children.append(std::move(n));
+    }
+}
+
+// ---- ASCII
+
+struct FbxAscii {
+    const QByteArray &d;
+    qsizetype at = 0;
+
+    void skipSpace(bool newlines)
+    {
+        while (at < d.size()) {
+            const char c = d[at];
+            if (c == ';' && newlines) {                  // comment to end of line
+                while (at < d.size() && d[at] != '\n')
+                    ++at;
+            } else if (c == ' ' || c == '\t' || c == '\r' || (newlines && c == '\n')) {
+                ++at;
+            } else {
+                break;
+            }
+        }
+    }
+
+    void block(FbxNode &parent)
+    {
+        for (;;) {
+            skipSpace(true);
+            if (at >= d.size())
+                return;
+            if (d[at] == '}') {
+                ++at;
+                return;
+            }
+            const qsizetype start = at;
+            while (at < d.size() && d[at] != ':' && d[at] != '\n' && d[at] != '{' && d[at] != '}')
+                ++at;
+            if (at >= d.size() || d[at] != ':') {      // junk line
+                if (at < d.size() && d[at] != '}')
+                    ++at;
+                continue;
+            }
+            FbxNode n;
+            n.name = d.mid(start, at - start).trimmed();
+            ++at;
+            values(n);
+            // "Name: *N { a: 1,2,3 }" stores its numbers in a child "a"
+            if (const FbxNode *a = n.child("a")) {
+                FbxProp arr;
+                arr.type = 'd';
+                for (const FbxProp &p : a->props)
+                    if (p.numeric())
+                        arr.arr.append(p.num);
+                n.props = {arr};
+                n.children.clear();
+            }
+            parent.children.append(std::move(n));
+        }
+    }
+
+    void values(FbxNode &n)
+    {
+        bool continued = false;
+        for (;;) {
+            skipSpace(false);
+            if (at >= d.size())
+                return;
+            const char c = d[at];
+            if (c == '\n') {
+                if (!continued)                          // a trailing comma continues on the next line
+                    return;
+                ++at;
+                continue;
+            }
+            if (c == '{') {
+                ++at;
+                block(n);
+                return;
+            }
+            if (c == '}')
+                return;
+            if (c == ',') {
+                continued = true;
+                ++at;
+                continue;
+            }
+            continued = false;
+            FbxProp p;
+            if (c == '"') {
+                const qsizetype s = ++at;
+                while (at < d.size() && d[at] != '"')
+                    ++at;
+                p.type = 'S';
+                p.str = d.mid(s, at - s);
+                ++at;
+            } else {
+                const qsizetype s = at;
+                while (at < d.size() && !QByteArrayView(",\n{} \t\r").contains(d[at]))
+                    ++at;
+                const QByteArray tok = d.mid(s, at - s);
+                if (tok.startsWith('*'))                 // array length marker
+                    continue;
+                bool okI = false, okD = false;
+                p.i = tok.toLongLong(&okI);
+                p.num = okI ? double(p.i) : tok.toDouble(&okD);
+                if (okI || okD) {
+                    p.type = okI ? 'L' : 'D';
+                    if (okD)
+                        p.i = qint64(p.num);
+                } else {
+                    p.type = 'S';
+                    p.str = tok;
+                }
+            }
+            n.props.append(p);
+        }
+    }
+};
+
+// "Name\0\1Class" (binary) or "Class::Name" (ASCII)
+QString fbxName(const QByteArray &raw)
+{
+    const int z = raw.indexOf('\0');
+    if (z >= 0)
+        return QString::fromUtf8(raw.left(z));
+    const int c = raw.indexOf("::");
+    return QString::fromUtf8(c >= 0 ? raw.mid(c + 2) : raw);
+}
+
+// Properties70 "P" (FBX 7) or Properties60 "Property" (FBX 6) values
+QVector<double> fbxProperty(const FbxNode &obj, const char *name)
+{
+    const FbxNode *props = obj.child("Properties70");
+    if (!props)
+        props = obj.child("Properties60");
+    QVector<double> out;
+    if (!props)
+        return out;
+    for (const FbxNode &p : props->children) {
+        if (p.props.isEmpty() || p.props[0].str != name)
+            continue;
+        for (int i = 1; i < p.props.size(); ++i)
+            if (p.props[i].numeric())
+                out.append(p.props[i].num);
+        return out;
+    }
+    return out;
+}
+
+QVector3D fbxVec(const FbxNode &obj, const char *name, const QVector3D &def)
+{
+    const QVector<double> v = fbxProperty(obj, name);
+    return v.size() >= 3 ? QVector3D(float(v[0]), float(v[1]), float(v[2])) : def;
+}
+
+QMatrix4x4 fbxEuler(const QVector3D &deg)
+{
+    QMatrix4x4 m;                                        // XYZ order: X is applied first
+    m.rotate(deg.z(), 0, 0, 1);
+    m.rotate(deg.y(), 0, 1, 0);
+    m.rotate(deg.x(), 1, 0, 0);
+    return m;
+}
+
+QMatrix4x4 fbxLocal(const FbxNode &model)
+{
+    auto tr = [](const QVector3D &v) { QMatrix4x4 m; m.translate(v); return m; };
+    const QVector3D rp = fbxVec(model, "RotationPivot", {}), sp = fbxVec(model, "ScalingPivot", {});
+    QMatrix4x4 s;
+    s.scale(fbxVec(model, "Lcl Scaling", QVector3D(1, 1, 1)));
+    return tr(fbxVec(model, "Lcl Translation", {})) * tr(fbxVec(model, "RotationOffset", {})) * tr(rp) *
+           fbxEuler(fbxVec(model, "PreRotation", {})) * fbxEuler(fbxVec(model, "Lcl Rotation", {})) *
+           fbxEuler(fbxVec(model, "PostRotation", {})).inverted() * tr(-rp) * tr(fbxVec(model, "ScalingOffset", {})) * tr(sp) *
+           s * tr(-sp);
+}
+
+QMatrix4x4 fbxGeometric(const FbxNode &model)
+{
+    QMatrix4x4 m;
+    m.translate(fbxVec(model, "GeometricTranslation", {}));
+    m *= fbxEuler(fbxVec(model, "GeometricRotation", {}));
+    m.scale(fbxVec(model, "GeometricScaling", QVector3D(1, 1, 1)));
+    return m;
+}
+
+struct FbxScene {
+    QHash<QByteArray, const FbxNode *> objects;
+    QHash<QByteArray, QVector<QByteArray>> parents;            // child -> parents (OO)
+    QHash<QByteArray, QVector<QByteArray>> children;           // parent -> children (OO, in file order)
+    QHash<QByteArray, QVector<QPair<QByteArray, QByteArray>>> propChildren;   // parent -> (child, property)
+    QDir dir;
+
+    bool isA(const QByteArray &key, const char *cls) const
+    {
+        const FbxNode *n = objects.value(key);
+        return n && n->name == cls;
+    }
+
+    QMatrix4x4 world(const QByteArray &model, int depth = 0) const
+    {
+        const FbxNode *n = objects.value(model);
+        if (!n || depth > 64)
+            return QMatrix4x4();
+        QMatrix4x4 m = fbxLocal(*n);
+        for (const QByteArray &p : parents.value(model))
+            if (isA(p, "Model"))
+                return world(p, depth + 1) * m;
+        return m;
+    }
+
+    QImage texture(const QByteArray &texKey) const
+    {
+        const FbxNode *tex = objects.value(texKey);
+        if (!tex)
+            return QImage();
+        // embedded image data lives in a connected Video object
+        for (const QByteArray &c : children.value(texKey)) {
+            const FbxNode *video = objects.value(c);
+            if (!video || video->name != "Video")
+                continue;
+            if (const FbxNode *content = video->child("Content"); content && !content->props.isEmpty()) {
+                QByteArray data = content->props[0].str;
+                if (content->props[0].type == 'S')
+                    data = QByteArray::fromBase64(data);
+                QImage img = QImage::fromData(data);
+                if (!img.isNull())
+                    return img.convertToFormat(QImage::Format_ARGB32);
+            }
+        }
+        for (const char *field : {"RelativeFilename", "FileName"}) {
+            QImage img = loadTexture(dir, QString::fromUtf8(tex->string(field)));
+            if (!img.isNull())
+                return img;
+        }
+        return QImage();
+    }
+};
+
+// value index into a LayerElement's data for one polygon corner
+int fbxLayerIndex(const FbxNode &le, const QVector<double> &index, int corner, int controlPoint, int polygon)
+{
+    const QByteArray mapping = le.string("MappingInformationType");
+    const QByteArray ref = le.string("ReferenceInformationType");
+    int i = corner;
+    if (mapping == "ByVertice" || mapping == "ByVertex" || mapping == "ByControlPoint")
+        i = controlPoint;
+    else if (mapping == "ByPolygon")
+        i = polygon;
+    else if (mapping == "AllSame")
+        i = 0;
+    if (ref.startsWith("Index"))                       // "IndexToDirect" or "Index"
+        i = i >= 0 && i < index.size() ? int(index[i]) : -1;
+    return i;
+}
+
+void fbxGeometry(const FbxScene &scene, const FbxNode &geo, const QByteArray &modelKey, const QMatrix4x4 &xf, Builder &b)
+{
+    const QVector<double> pos = geo.numbers("Vertices");
+    const QVector<double> poly = geo.numbers("PolygonVertexIndex");
+    if (pos.size() < 9 || poly.size() < 3)
+        return;
+    const FbxNode *nle = geo.child("LayerElementNormal");
+    struct UvLayer { const FbxNode *node; QVector<double> uv, index; int channel; };
+    QVector<UvLayer> uvLayers;
+    for (const FbxNode &c : geo.children)
+        if (c.name == "LayerElementUV") {
+            const QByteArray name = c.string("Name");
+            uvLayers.append({&c, c.numbers("UV"), c.numbers("UVIndex"),
+                             b.uvChannel(name.isEmpty() ? QStringLiteral("UV %1").arg(uvLayers.size() + 1) : QString::fromUtf8(name))});
+        }
+    const FbxNode *mle = geo.child("LayerElementMaterial");
+    const QVector<double> normals = nle ? nle->numbers("Normals") : QVector<double>();
+    const QVector<double> normalIdx = nle ? nle->numbers("NormalsIndex") : QVector<double>();
+    const QVector<double> mats = mle ? mle->numbers("Materials") : QVector<double>();
+    const bool mlAll = mle && mle->string("MappingInformationType") == "AllSame";
+
+    // the model's materials, in connection order (polygon material indices refer to this list)
+    QVector<int> materials;
+    for (const QByteArray &c : scene.children.value(modelKey)) {
+        if (!scene.isA(c, "Material"))
+            continue;
+        const FbxNode *mo = scene.objects.value(c);
+        const int idx = b.material(fbxName(mo->props.value(1).str.isEmpty() ? mo->props.value(0).str : mo->props[1].str));
+        Material &m = b.materials[idx];
+        QVector3D col = fbxVec(*mo, "DiffuseColor", fbxVec(*mo, "Diffuse", QVector3D(0.8f, 0.8f, 0.8f)));
+        m.color = QColor::fromRgbF(std::clamp(col.x(), 0.f, 1.f), std::clamp(col.y(), 0.f, 1.f), std::clamp(col.z(), 0.f, 1.f));
+        for (const auto &[tex, prop] : scene.propChildren.value(c)) {
+            if (!scene.isA(tex, "Texture"))
+                continue;
+            if (m.texture.isNull() && (prop == "DiffuseColor" || prop == "Diffuse" || prop.endsWith("baseColor") || prop == "Maya|base_color"))
+                m.texture = scene.texture(tex);
+            else if (m.normalTexture.isNull() && (prop == "NormalMap" || prop == "Bump" || prop.endsWith("normalCamera")))
+                m.normalTexture = scene.texture(tex);
+        }
+        materials.append(idx);
+    }
+    if (materials.isEmpty())
+        materials.append(b.material("Default"));
+
+    const QMatrix3x3 nxf = xf.normalMatrix();
+    const bool mirrored = xf.determinant() < 0;
+    const int weldBase = int(b.vertices.size());              // weld ids: control points, unique per geometry
+    const int cpCount = int(pos.size() / 3);
+    QVector<quint32> face;
+    int polygon = 0, corner = 0;
+    for (int i = 0; i < poly.size(); ++i, ++corner) {
+        int cp = int(poly[i]);
+        const bool last = cp < 0;
+        if (last)
+            cp = ~cp;                                         // negative index ends the polygon
+        if (cp >= cpCount)
+            continue;
+        Vertex v;
+        v.pos = xf.map(QVector3D(float(pos[cp * 3]), float(pos[cp * 3 + 1]), float(pos[cp * 3 + 2])));
+        bool hasNormal = false;
+        if (nle) {
+            const int ni = fbxLayerIndex(*nle, normalIdx, corner, cp, polygon);
+            if (ni >= 0 && ni * 3 + 2 < normals.size()) {
+                const QVector3D n{float(normals[ni * 3]), float(normals[ni * 3 + 1]), float(normals[ni * 3 + 2])};
+                const float *m = nxf.constData();
+                v.normal = QVector3D(m[0] * n.x() + m[3] * n.y() + m[6] * n.z(), m[1] * n.x() + m[4] * n.y() + m[7] * n.z(),
+                                     m[2] * n.x() + m[5] * n.y() + m[8] * n.z()).normalized();
+                hasNormal = true;
+            }
+        }
+        const quint32 vi = b.add(v, weldBase + cp, !hasNormal);
+        for (const UvLayer &l : uvLayers) {
+            const int ti = fbxLayerIndex(*l.node, l.index, corner, cp, polygon);
+            if (ti >= 0 && ti * 2 + 1 < l.uv.size())
+                b.setUV(l.channel, vi, float(l.uv[ti * 2]), float(l.uv[ti * 2 + 1]));
+        }
+        face.append(vi);
+        if (last) {
+            const int mi = mats.isEmpty() ? 0 : int(mats.value(mlAll ? 0 : polygon, 0));
+            const int mat = materials.value(mi, materials[0]);
+            for (int k = 1; k + 1 < face.size(); ++k)
+                mirrored ? b.triangle(mat, face[0], face[k + 1], face[k]) : b.triangle(mat, face[0], face[k], face[k + 1]);
+            face.clear();
+            ++polygon;
+        }
+    }
+}
+
+bool loadFbx(const QString &path, Builder &b, QString *error)
+{
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (error)
+            *error = f.errorString();
+        return false;
+    }
+    const QByteArray data = f.readAll();
+    FbxNode root;
+    if (data.startsWith("Kaydara FBX Binary")) {
+        if (!fbxParseBinary(data, root)) {
+            if (error)
+                *error = QObject::tr("Damaged or unsupported binary FBX file");
+            return false;
+        }
+    } else {
+        FbxAscii parser{data};
+        parser.block(root);
+    }
+    const FbxNode *objects = root.child("Objects");
+    if (!objects) {
+        if (error)
+            *error = QObject::tr("Not an FBX file");
+        return false;
+    }
+    FbxScene scene;
+    scene.dir = QFileInfo(path).dir();
+    for (const FbxNode &o : objects->children)
+        scene.objects.insert(o.key(), &o);
+    if (const FbxNode *conns = root.child("Connections"))
+        for (const FbxNode &c : conns->children) {
+            if (c.props.size() < 3)
+                continue;
+            FbxNode child, parent;                               // reuse key() for ids and names alike
+            child.props = {c.props[1]};
+            parent.props = {c.props[2]};
+            if (c.props[0].str == "OP" && c.props.size() >= 4)
+                scene.propChildren[parent.key()].append({child.key(), c.props[3].str});
+            else
+                scene.parents[child.key()].append(parent.key());
+            scene.children[parent.key()].append(child.key());
+        }
+
+    // file axes -> Y up, right handed
+    QMatrix4x4 axes;
+    if (const FbxNode *gs = root.child("GlobalSettings")) {
+        const QVector<double> up = fbxProperty(*gs, "UpAxis"), upSign = fbxProperty(*gs, "UpAxisSign");
+        const QVector<double> co = fbxProperty(*gs, "CoordAxis"), coSign = fbxProperty(*gs, "CoordAxisSign");
+        if (!up.isEmpty() && !co.isEmpty() && int(up[0]) != int(co[0]) && int(up[0]) >= 0 && int(up[0]) < 3 && int(co[0]) >= 0 &&
+            int(co[0]) < 3) {
+            QVector3D right, upv;
+            right[int(co[0])] = coSign.isEmpty() ? 1.f : float(coSign[0]);
+            upv[int(up[0])] = upSign.isEmpty() ? 1.f : float(upSign[0]);
+            const QVector3D front = QVector3D::crossProduct(right, upv);
+            axes = QMatrix4x4(right.x(), right.y(), right.z(), 0, upv.x(), upv.y(), upv.z(), 0, front.x(), front.y(), front.z(), 0,
+                              0, 0, 0, 1);
+        }
+    }
+
+    for (auto it = scene.objects.cbegin(); it != scene.objects.cend(); ++it) {
+        const FbxNode &o = *it.value();
+        if (o.name == "Geometry") {
+            for (const QByteArray &p : scene.parents.value(it.key()))
+                if (scene.isA(p, "Model")) {
+                    const FbxNode &model = *scene.objects.value(p);
+                    fbxGeometry(scene, o, p, axes * scene.world(p) * fbxGeometric(model), b);
+                }
+        } else if (o.name == "Model" && o.child("Vertices")) {
+            fbxGeometry(scene, o, it.key(), axes * scene.world(it.key()), b);   // FBX 6: geometry inside the model
+        }
+    }
+    return true;
+}
+
 } // namespace
 
-QStringList modelSuffixes() { return {"obj", "gltf", "glb", "stl", "ply"}; }
+QStringList modelSuffixes() { return {"obj", "gltf", "glb", "fbx", "stl", "ply"}; }
 
 QString modelFileFilter()
 {
     return QObject::tr("3D models (*.obj *.gltf *.glb *.stl *.ply);;Wavefront OBJ (*.obj);;glTF 2.0 (*.gltf *.glb);;"
                        "STL (*.stl);;PLY (*.ply);;All files (*)");
+}
+
+void Model::selectUVSet(int set)
+{
+    if (set < 0 || set >= uvData.size())
+        return;
+    uvSet = set;
+    const QVector<QVector2D> &uv = uvData[set];
+    for (int i = 0; i < vertices.size() && i < uv.size(); ++i) {
+        vertices[i].u = uv[i].x();
+        vertices[i].v = uv[i].y();
+    }
 }
 
 Model loadModel(const QString &path, QString *error)
@@ -756,6 +1422,8 @@ Model loadModel(const QString &path, QString *error)
         ok = loadObj(path, b, error);
     else if (suffix == "gltf" || suffix == "glb")
         ok = loadGltf(path, b, error);
+    else if (suffix == "fbx")
+        ok = loadFbx(path, b, error);
     else if (suffix == "stl")
         ok = loadStl(path, b, error);
     else if (suffix == "ply")

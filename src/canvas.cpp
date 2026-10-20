@@ -438,6 +438,7 @@ void CanvasView::paintEvent(QPaintEvent *e)
         p.restore();
     }
 
+    m_main->paintCanvasOverlays(p, QTransform::fromTranslate(o.x(), o.y()).scale(m_zoom, m_zoom));
     drawSelection(p);
     if (Tool *t = m_main->currentTool())
         t->paintOverlay(p, this);

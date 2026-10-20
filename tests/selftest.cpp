@@ -19,6 +19,8 @@
 #include <QMenuBar>
 #include <QMenu>
 #include <QComboBox>
+#include <QCheckBox>
+#include <QSplitter>
 #include <QLabel>
 #include <QPainter>
 #include <cstdio>
@@ -89,6 +91,7 @@ static void shot(const char *name)
 
 #ifdef PIXELFORGE_HAVE_MODELVIEW
 #include "meshrender.h"
+#include "convert.h"
 #include <QFile>
 #include <QTextStream>
 
@@ -115,6 +118,7 @@ static void modelViewTests(MainWindow &w)
     QString err;
     Model m = loadModel(dir.filePath("quads.obj"), &err);
     CHECK(m.triangleCount() == 4 && m.materials.size() == 2 && m.parts.size() == 2 && m.hasUV, "OBJ: quads, materials and UVs");
+    CHECK(m.uvSets.size() == 1 && m.uvData.size() == 1, "OBJ: one UV map");
     CHECK(!m.vertices.isEmpty() && m.vertices[0].normal.z() > 0.99f, "OBJ: missing normals are generated");
 
     QImage halves(8, 8, QImage::Format_ARGB32);
@@ -167,6 +171,86 @@ static void modelViewTests(MainWindow &w)
     CHECK(ply.triangleCount() == 2 && ply.hasUV, "PLY (ASCII) with texture coordinates");
     CHECK(loadModel(dir.filePath("missing.obj"), &err).isEmpty() && !err.isEmpty(), "missing file reports an error");
 
+    // ASCII FBX 7: a quad with per-corner UVs and a material on a translated, Z-up model
+    writeText(dir.filePath("quad.fbx"),
+              "; FBX 7.4.0 project file\nFBXHeaderExtension:  {\n\tFBXVersion: 7400\n}\n"
+              "GlobalSettings:  {\n\tProperties70:  {\n\t\tP: \"UpAxis\", \"int\", \"Integer\", \"\",2\n"
+              "\t\tP: \"UpAxisSign\", \"int\", \"Integer\", \"\",1\n\t\tP: \"CoordAxis\", \"int\", \"Integer\", \"\",0\n"
+              "\t\tP: \"CoordAxisSign\", \"int\", \"Integer\", \"\",1\n\t}\n}\n"
+              "Objects:  {\n"
+              "\tGeometry: 100, \"Geometry::Quad\", \"Mesh\" {\n"
+              "\t\tVertices: *12 {\n\t\t\ta: 0,0,0,1,0,0,1,0,1,\n0,0,1\n\t\t}\n"
+              "\t\tPolygonVertexIndex: *4 {\n\t\t\ta: 0,1,2,-4\n\t\t}\n"
+              "\t\tLayerElementUV: 0 {\n\t\t\tName: \"Main\"\n\t\t\tMappingInformationType: \"ByPolygonVertex\"\n"
+              "\t\t\tReferenceInformationType: \"IndexToDirect\"\n\t\t\tUV: *8 {\n\t\t\t\ta: 0,0,1,0,1,1,0,1\n\t\t\t}\n"
+              "\t\t\tUVIndex: *4 {\n\t\t\t\ta: 0,1,2,3\n\t\t\t}\n\t\t}\n"
+              "\t\tLayerElementUV: 1 {\n\t\t\tName: \"Lightmap\"\n\t\t\tMappingInformationType: \"ByPolygonVertex\"\n"
+              "\t\t\tReferenceInformationType: \"Direct\"\n\t\t\tUV: *8 {\n\t\t\t\ta: 0,0,0.5,0,0.5,0.5,0,0.5\n\t\t\t}\n\t\t}\n"
+              "\t\tLayerElementMaterial: 0 {\n\t\t\tMappingInformationType: \"AllSame\"\n"
+              "\t\t\tReferenceInformationType: \"IndexToDirect\"\n\t\t\tMaterials: *1 {\n\t\t\t\ta: 0\n\t\t\t}\n\t\t}\n"
+              "\t}\n"
+              "\tModel: 200, \"Model::Quad\", \"Mesh\" {\n\t\tProperties70:  {\n"
+              "\t\t\tP: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",10,0,0\n\t\t}\n\t}\n"
+              "\tMaterial: 300, \"Material::Wood\", \"\" {\n\t\tProperties70:  {\n"
+              "\t\t\tP: \"DiffuseColor\", \"Color\", \"\", \"A\",0,1,0\n\t\t}\n\t}\n"
+              "}\n"
+              "Connections:  {\n\tC: \"OO\",100,200\n\tC: \"OO\",300,200\n\tC: \"OO\",200,0\n}\n");
+    Model fbx = loadModel(dir.filePath("quad.fbx"), &err);
+    CHECK(fbx.triangleCount() == 2 && fbx.hasUV && fbx.materials.value(0).name == "Wood" &&
+              fbx.materials[0].color == QColor(0, 255, 0),
+          "FBX (ASCII): polygons, UVs and connected material");
+    float maxY = -1e9f, minX = 1e9f;
+    for (const Vertex &v : fbx.vertices) {
+        maxY = std::max(maxY, v.pos.y());
+        minX = std::min(minX, v.pos.x());
+    }
+    CHECK(std::abs(maxY - 1) < 1e-4f && std::abs(minX - 10) < 1e-4f, "FBX: Z-up file converted to Y-up, model translation applied");
+    CHECK(!fbx.vertices.isEmpty() && std::abs(fbx.vertices[0].normal.z()) > 0.99f, "FBX: normals generated when missing");
+    CHECK(fbx.uvSets == QStringList({"Main", "Lightmap"}), "FBX: every UV layer becomes a named UV map");
+    float maxU = 0;
+    for (const Vertex &v : fbx.vertices)
+        maxU = std::max(maxU, v.u);
+    fbx.selectUVSet(1);
+    float maxU2 = 0;
+    for (const Vertex &v : fbx.vertices)
+        maxU2 = std::max(maxU2, v.u);
+    CHECK(std::abs(maxU - 1) < 1e-5f && std::abs(maxU2 - 0.5f) < 1e-5f && fbx.uvSet == 1, "selecting a UV map switches the vertex UVs");
+
+    // converter middleware, driven by a stand-in "assimp" that copies a prepared GLB
+    QByteArray json = "{\"asset\":{\"version\":\"2.0\"},\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0}}]}],"
+                      "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}],"
+                      "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36}],\"buffers\":[{\"byteLength\":36}]}";
+    while (json.size() % 4)
+        json += ' ';
+    QByteArray glb = "glTF";
+    auto u32 = [](QByteArray &b, quint32 v) { b.append(reinterpret_cast<const char *>(&v), 4); };
+    u32(glb, 2);
+    u32(glb, quint32(12 + 8 + json.size() + 8 + buf.size()));
+    u32(glb, quint32(json.size()));
+    glb += "JSON" + json;
+    u32(glb, quint32(buf.size()));
+    glb += QByteArray("BIN\0", 4) + buf;
+    writeText(dir.filePath("tri.glb"), glb);
+    CHECK(loadModel(dir.filePath("tri.glb")).triangleCount() == 1, "GLB container");
+    const QString tool = dir.filePath("fake-assimp.sh");
+    writeText(tool, ("#!/bin/sh\n[ -f \"" + dir.filePath("tool-broken") + "\" ] && { echo 'cannot read this'; exit 1; }\n"
+                     "cp \"" + dir.filePath("tri.glb") + "\" \"$3\"\n").toUtf8());
+    QFile::setPermissions(tool, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    qputenv("PIXELFORGE_ASSIMP", tool.toUtf8());
+    QFile::remove(dir.filePath("tool-broken"));
+    writeText(dir.filePath("thing.lwo"), "not really a LightWave file");
+    QFile::remove(conversionCacheFile(dir.filePath("thing.lwo")));
+    CHECK(convertibleSuffixes().contains("lwo"), "installed converters add their formats");
+    const QString converted = Conversion::convert(dir.filePath("thing.lwo"), &err);
+    CHECK(!converted.isEmpty() && loadModel(converted).triangleCount() == 1, "foreign format is converted to GLB and loads");
+    writeText(dir.filePath("tool-broken"), "1");
+    CHECK(Conversion::convert(dir.filePath("thing.lwo"), &err) == converted, "unchanged files are served from the conversion cache");
+    writeText(dir.filePath("other.ms3d"), "x");
+    QFile::remove(conversionCacheFile(dir.filePath("other.ms3d")));
+    CHECK(Conversion::convert(dir.filePath("other.ms3d"), &err).isEmpty() && err.contains("cannot read this"),
+          "converter failures report the tool's message");
+    QFile::remove(dir.filePath("tool-broken"));
+
     // the plugin window: slots follow the document and the preview updates while painting
     QAction *act = w.action("plugin_modelview");
     CHECK(act != nullptr, "model preview plugin registered its window");
@@ -180,10 +264,20 @@ static void modelViewTests(MainWindow &w)
     bool opened = false;
     QMetaObject::invokeMethod(panel, "openModel", Q_RETURN_ARG(bool, opened), Q_ARG(QString, dir.filePath("quads.obj")), Q_ARG(bool, false));
     CHECK(opened, "panel opens the model");
-    QList<QComboBox *> combos = panel->findChildren<QComboBox *>();
+    // the slot comboboxes (the UV map selector stays hidden for single-UV models)
+    auto slotCombos = [panel] {
+        QList<QComboBox *> out;
+        for (QComboBox *c : panel->findChildren<QComboBox *>())
+            if (c->isVisibleTo(panel))
+                out << c;
+        return out;
+    };
+    pump();                                           // new slot rows are shown by a queued event
+    QList<QComboBox *> combos = slotCombos();
     CHECK(combos.size() == 4, "one colour and one normal slot per material");
-    CHECK(!combos.isEmpty() && combos[0]->currentText() == "(whole image)" && combos[0]->findText("Background") >= 0,
-          "slots default to the whole image and list the layers");
+    CHECK(combos.size() == 4 && combos[0]->currentText() == "(none)" && combos[2]->currentText() == "(none)" &&
+              combos[0]->findText("Background") >= 0 && combos[0]->findText("(material color)") >= 0,
+          "slots default to (none) and list the layers");
     QWidget *view = nullptr;
     for (QWidget *c : panel->findChildren<QWidget *>())
         if (c->inherits("ModelView::View"))
@@ -198,8 +292,13 @@ static void modelViewTests(MainWindow &w)
         while (t.elapsed() < 250)
             QApplication::processEvents();
     };
-    if (view) {
+    if (view && combos.size() == 4) {
         view->resize(240, 200);
+        wait();
+        const QColor hidden = centre();
+        CHECK(std::abs(hidden.red() - hidden.blue()) < 30, "materials set to (none) are not drawn");
+        combos[0]->setCurrentIndex(combos[0]->findText("(whole image)"));      // Left: whole image
+        combos[2]->setCurrentIndex(combos[2]->findText("Background"));         // Right: the Background layer
         wait();
         QColor before = centre();
         CHECK(before.red() > before.blue() + 40, "preview shows the red image on the model");
@@ -208,8 +307,99 @@ static void modelViewTests(MainWindow &w)
         wait();
         QColor after = centre();
         CHECK(after.blue() > after.red() + 40, "preview follows edits in real time");
+
+        // UV layout on the canvas: the quads' diagonal edge runs through the image centre
+        QCheckBox *uvs = nullptr;
+        for (QCheckBox *c : panel->findChildren<QCheckBox *>())
+            if (c->text() == "UVs on canvas")
+                uvs = c;
+        CHECK(uvs != nullptr && panel->findChild<QSplitter *>() != nullptr, "UV overlay toggle and resizable splitter exist");
+        if (uvs) {
+            w.view()->setZoom(24);
+            auto canvasAt = [&w](QPointF img) {
+                pump();
+                const QImage g = w.view()->viewport()->grab().toImage();
+                const QPoint v = (w.view()->imageToView(img) * g.devicePixelRatio()).toPoint();
+                QColor best(g.pixel(v));                    // greenest pixel around: lines are 1px, antialiased
+                for (int dy = -2; dy <= 2; ++dy)
+                    for (int dx = -2; dx <= 2; ++dx)
+                        if (QColor c(g.pixel(v + QPoint(dx, dy))); c.green() > best.green())
+                            best = c;
+                return best;
+            };
+            uvs->setChecked(false);
+            const QColor plain = canvasAt({4, 4});
+            uvs->setChecked(true);
+            const QColor lined = canvasAt({4, 4});
+            CHECK(plain.green() < 40 && lined.green() > 70, "UV edges are drawn over the image");
+            CHECK(canvasAt({2, 4}).green() < 40, "...and only along the UV edges");
+            shot("11-uv-overlay");
+            // both quads share the 0..1 UV square: hide Left, so only the layer-bound Right remains
+            combos[0]->setCurrentIndex(combos[0]->findText("(none)"));
+            CHECK(canvasAt({4, 4}).green() > 70, "UVs of a material bound to the active layer are shown");
+            w.action("layeradd")->trigger();                                    // a new layer becomes active
+            wait();
+            CHECK(canvasAt({4, 4}).green() < 40, "...and hidden while another layer is being edited");
+            md->setActiveIndex(0);
+            wait();
+            CHECK(canvasAt({4, 4}).green() > 70, "...and back when its layer is active again");
+            combos[2]->setCurrentIndex(combos[2]->findText("(none)"));
+            CHECK(canvasAt({4, 4}).green() < 40, "hidden materials show no UVs");
+            combos[0]->setCurrentIndex(combos[0]->findText("(whole image)"));
+            w.action("layeradd")->trigger();
+            wait();
+            CHECK(canvasAt({4, 4}).green() > 70, "whole-image materials show their UVs on every layer");
+            uvs->setChecked(false);
+            CHECK(canvasAt({4, 4}).green() < 40, "UV overlay toggles off");
+        }
         shot("10-model-preview");
     }
+    // UV Map flood mode: two separate islands, (0.1..0.4)^2 and (0.6..0.9)^2 in UV space
+    writeText(dir.filePath("islands.obj"),
+              "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 2 0 0\nv 3 0 0\nv 3 1 0\nv 2 1 0\n"
+              "vt 0.1 0.1\nvt 0.4 0.1\nvt 0.4 0.4\nvt 0.1 0.4\nvt 0.6 0.6\nvt 0.9 0.6\nvt 0.9 0.9\nvt 0.6 0.9\n"
+              "f 1/1 2/2 3/3 4/4\nf 5/5 6/6 7/7 8/8\n");
+    {
+        auto *ud = new Document(QSize(40, 40), Qt::white);
+        ud->resetHistory("New Image", Icons::get("new"));
+        w.addDocument(ud, false);
+        w.view()->setZoom(4);
+        pump();
+        QMetaObject::invokeMethod(panel, "openModel", Q_RETURN_ARG(bool, opened), Q_ARG(QString, dir.filePath("islands.obj")), Q_ARG(bool, false));
+        pump();
+        QList<QComboBox *> c = slotCombos();
+        w.settings().floodMode = FloodMode::UVMap;
+        w.setActiveTool(ToolId::MagicWand);
+        click({10, 30});
+        CHECK(!ud->hasSelection(), "UV Map mode does nothing while no material uses the image");
+        if (!c.isEmpty())
+            c[0]->setCurrentIndex(c[0]->findText("(whole image)"));
+        click({10, 30});                                   // u 0.25, v 0.25 -> inside the first island
+        CHECK(ud->hasSelection() && ud->selectionBounds() == QRect(4, 24, 12, 12), "magic wand selects a whole UV island");
+        w.action("deselect")->trigger();
+        w.colors().setPrimary(QColor(255, 0, 0));
+        w.setActiveTool(ToolId::Bucket);
+        click({20, 20});                                   // between the islands
+        auto at = [ud](int x, int y) { return QColor(ud->activeImage().pixel(x, y)); };
+        CHECK(at(20, 20) == QColor(255, 0, 0) && at(0, 0) == QColor(255, 0, 0) && at(39, 39) == QColor(255, 0, 0),
+              "bucket fills the gap space between UV islands");
+        CHECK(at(10, 30) == Qt::white && at(30, 10) == Qt::white, "...without touching the islands");
+        w.colors().setPrimary(QColor(0, 160, 0));
+        click({30, 10});                                   // second island
+        CHECK(at(30, 10) == QColor(0, 160, 0) && at(25, 5) == QColor(0, 160, 0) && at(10, 30) == Qt::white &&
+                  at(20, 20) == QColor(255, 0, 0),
+              "bucket fills exactly one UV island");
+        w.settings().floodMode = FloodMode::Contiguous;
+        w.setActiveTool(ToolId::Brush);
+    }
+
+    QFile::remove(conversionCacheFile(dir.filePath("thing.lwo")));
+    QMetaObject::invokeMethod(panel, "openModel", Q_RETURN_ARG(bool, opened), Q_ARG(QString, dir.filePath("thing.lwo")), Q_ARG(bool, false));
+    QElapsedTimer t;
+    t.start();
+    while (t.elapsed() < 5000 && slotCombos().size() != 2)
+        QApplication::processEvents();
+    CHECK(slotCombos().size() == 2, "panel converts a foreign format in the background and shows it");
     act->setChecked(false);
 }
 #endif
@@ -224,6 +414,7 @@ int main(int argc, char **argv)
 {
     // keep the user's real settings untouched
     qputenv("XDG_CONFIG_HOME", QDir::temp().filePath("pixelforge-selftest-config").toUtf8());
+    qputenv("XDG_CACHE_HOME", QDir::temp().filePath("pixelforge-selftest-cache").toUtf8());
     QApplication app(argc, argv);
     if (argc > 1)
         g_shotDir = argv[1];

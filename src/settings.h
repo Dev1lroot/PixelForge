@@ -10,6 +10,8 @@ enum class ShapeType { Outline, Filled, FilledOutline };
 enum class GradientType { Linear, LinearReflected, Diamond, Radial, Conical };
 enum class AfterPick { DoNothing, PreviousTool, Pencil };
 enum class Units { Pixels, Inches, Centimeters };
+// Magic Wand / Paint Bucket: similar connected colours, similar colours anywhere, or a UV region
+enum class FloodMode { Contiguous, Global, UVMap };
 
 // Settings shared across all tools (exactly like the classic editor: brush width,
 // antialiasing etc. are global and shown in the tool options bar when relevant).
@@ -24,7 +26,7 @@ public:
     int fillStyle = 0;                  // 0 = solid, otherwise index into hatch list
     ShapeType shapeType = ShapeType::Outline;
     int tolerance = 50;                 // percent
-    bool globalFill = false;
+    FloodMode floodMode = FloodMode::Contiguous;
     SelectionMode selectionMode = SelectionMode::Replace;
     GradientType gradientType = GradientType::Linear;
     bool gradientTransparency = false;

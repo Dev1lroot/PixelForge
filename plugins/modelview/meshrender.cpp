@@ -122,6 +122,8 @@ void renderModel(const Model &model, const QVector<MaterialTextures> &textures, 
     QVector<Tri> tris;
     tris.reserve(model.triangleCount());
     for (const Part &part : model.parts) {
+        if (part.material < textures.size() && textures[part.material].hidden)
+            continue;
         const bool normalMapped = rp.normalMaps && model.hasUV && part.material < textures.size() &&
                                   !textures[part.material].normal.isNull();
         for (int i = part.first; i + 2 < part.first + part.count; i += 3) {
