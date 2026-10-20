@@ -8,3 +8,4 @@ ref*.webp
 # only the example plugins are published; other plugins/<name>/ folders are local
 /plugins/*
 !/plugins/examples/
+!/plugins/modelview/

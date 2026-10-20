@@ -54,6 +54,10 @@ position and zoom.
 | T | Text (font, size, B/I/U/S, alignment, movable while editing) |
 | O | Line/Curve (drag handles or the line to bend, Enter to finish), Rectangle, Rounded Rectangle, Ellipse, Freeform Shape |
 
+Paintbrush, Eraser and Clone Stamp have a **Hardness** slider next to the brush width:
+100% paints a hard edge, lower values fade the brush out smoothly towards its rim
+(overlaps within one stroke never build up).
+
 Selection modifiers: Ctrl = add, right button = subtract, Ctrl+right = xor,
 Alt = intersect, Shift = square/circle. Move Selected Pixels: drag to move, handles to
 scale (Shift keeps aspect), right-drag to rotate (Shift snaps to 15°), arrow keys nudge,
@@ -103,6 +107,17 @@ of stacked frames (auto-detects square frames, e.g. 16×64 → 4 frames), a hori
 strip, one frame per layer (optionally with the bottom layer as a fixed background
 and hidden layers skipped), or a texture scrolling vertically/horizontally with
 wrap-around. Adjustable fps, step, pixelated scaling; updates live while you paint.
+
+**3D Model Preview** (*Window → 3D Model Preview*, F12) — open (or drop) an OBJ (+MTL),
+glTF 2.0 (.gltf/.glb), STL or PLY model and see the current image mapped onto it through
+the model's UVs, updating live while you paint. Every material of the model is a texture
+slot with a *Color* and a *Normal* combobox: pick the whole image, any layer (hidden layers
+work too), the model's own texture, or nothing. Layers named after a material
+(`Body`, `body normal`, `Body_n`) and a lone `normal` layer are assigned automatically.
+Drag to orbit, right/middle-drag to pan, wheel to zoom, double-click to reset; toggles for
+pixelated sampling, lighting, normal maps, two-sided faces, wireframe and auto-rotate.
+The model file is watched and reloads when it is re-exported. Software-rendered, so it needs
+no GPU drivers; `-DPIXELFORGE_MODELVIEW=OFF` skips it.
 
 ## Plugins
 
@@ -167,6 +182,7 @@ directories above.
 | `src/animpanel.*` | animation preview window |
 | `src/pluginapi.h`, `src/pluginhost.*` | plugin API and loader |
 | `plugins/examples/` | example plugins (hello, histogram, export layers) |
+| `plugins/modelview/` | 3D model preview plugin: model loaders (`meshio`), software rasterizer (`meshrender`), window |
 | `tests/selftest.cpp` | headless end-to-end test |
 
 ## License

@@ -87,6 +87,133 @@ static void shot(const char *name)
     g_win->grab().save(g_shotDir + "/" + name + ".png");
 }
 
+#ifdef PIXELFORGE_HAVE_MODELVIEW
+#include "meshrender.h"
+#include <QFile>
+#include <QTextStream>
+
+static void writeText(const QString &path, const QByteArray &text)
+{
+    QFile f(path);
+    if (f.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        f.write(text);
+}
+
+static void modelViewTests(MainWindow &w)
+{
+    using namespace ModelView;
+    std::printf("[3d model preview]\n");
+    QDir dir(QDir::temp().filePath("pixelforge-modelview-test"));
+    dir.mkpath(".");
+    // two unit quads side by side facing +z, one material each
+    writeText(dir.filePath("quads.mtl"), "newmtl Left\nKd 1 1 1\nnewmtl Right\nKd 1 1 1\n");
+    writeText(dir.filePath("quads.obj"),
+              "mtllib quads.mtl\n"
+              "v -2 -1 0\nv 0 -1 0\nv 0 1 0\nv -2 1 0\nv 0 -1 0\nv 2 -1 0\nv 2 1 0\nv 0 1 0\n"
+              "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
+              "usemtl Left\nf 1/1 2/2 3/3 4/4\nusemtl Right\nf -4/1 -3/2 -2/3 -1/4\n");
+    QString err;
+    Model m = loadModel(dir.filePath("quads.obj"), &err);
+    CHECK(m.triangleCount() == 4 && m.materials.size() == 2 && m.parts.size() == 2 && m.hasUV, "OBJ: quads, materials and UVs");
+    CHECK(!m.vertices.isEmpty() && m.vertices[0].normal.z() > 0.99f, "OBJ: missing normals are generated");
+
+    QImage halves(8, 8, QImage::Format_ARGB32);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x)
+            halves.setPixel(x, y, y < 4 ? qRgb(0, 255, 0) : qRgb(255, 0, 0));
+    QImage blue(8, 8, QImage::Format_ARGB32);
+    blue.fill(qRgb(0, 0, 255));
+    QVector<MaterialTextures> tex(2);
+    tex[0].base = halves;
+    tex[1].base = blue;
+    RenderParams rp;
+    rp.yaw = rp.pitch = 0;
+    rp.lighting = false;
+    QImage out(200, 160, QImage::Format_RGB32);
+    renderModel(m, tex, rp, out);
+    const QRgb upperLeft = out.pixel(70, 70), lowerLeft = out.pixel(70, 90), right = out.pixel(130, 80);
+    CHECK(qGreen(upperLeft) > 200 && qRed(upperLeft) < 50, "texture top row maps to the top of the model (v up)");
+    CHECK(qRed(lowerLeft) > 200 && qGreen(lowerLeft) < 50, "texture bottom row at the bottom");
+    CHECK(qBlue(right) > 200 && qRed(right) < 50, "second material uses its own slot");
+    rp.yaw = M_PI;
+    rp.twoSided = false;
+    renderModel(m, tex, rp, out);
+    CHECK(qBlue(out.pixel(130, 80)) < 120 && qGreen(out.pixel(70, 70)) < 120, "back faces are culled when not two-sided");
+
+    QByteArray buf;
+    for (float f : {0.f, 0.f, 0.f, 1.f, 0.f, 0.f, 0.f, 1.f, 0.f})
+        buf.append(reinterpret_cast<const char *>(&f), 4);
+    writeText(dir.filePath("tri.gltf"),
+              "{\"asset\":{\"version\":\"2.0\"},\"scene\":0,\"scenes\":[{\"nodes\":[0]}],"
+              "\"nodes\":[{\"mesh\":0,\"translation\":[5,0,0]}],"
+              "\"meshes\":[{\"primitives\":[{\"attributes\":{\"POSITION\":0},\"material\":0}]}],"
+              "\"materials\":[{\"name\":\"Skin\",\"pbrMetallicRoughness\":{\"baseColorFactor\":[1,0,0,1]}}],"
+              "\"accessors\":[{\"bufferView\":0,\"componentType\":5126,\"count\":3,\"type\":\"VEC3\"}],"
+              "\"bufferViews\":[{\"buffer\":0,\"byteLength\":36}],"
+              "\"buffers\":[{\"byteLength\":36,\"uri\":\"data:application/octet-stream;base64," + buf.toBase64() + "\"}]}");
+    Model g = loadModel(dir.filePath("tri.gltf"), &err);
+    CHECK(g.triangleCount() == 1 && !g.hasUV && g.materials.value(0).name == "Skin" && g.materials[0].color == QColor(255, 0, 0),
+          "glTF: embedded buffer, material name and colour");
+    CHECK(!g.vertices.isEmpty() && std::abs(g.vertices[1].pos.x() - 6) < 1e-4f, "glTF: node transforms are applied");
+
+    writeText(dir.filePath("tri.stl"), "solid t\nfacet normal 0 0 1\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\n"
+                                       "endloop\nendfacet\nendsolid t\n");
+    CHECK(loadModel(dir.filePath("tri.stl")).triangleCount() == 1, "STL (ASCII)");
+    writeText(dir.filePath("quad.ply"), "ply\nformat ascii 1.0\nelement vertex 4\nproperty float x\nproperty float y\n"
+                                        "property float z\nproperty float s\nproperty float t\nelement face 1\n"
+                                        "property list uchar int vertex_indices\nend_header\n"
+                                        "0 0 0 0 0\n1 0 0 1 0\n1 1 0 1 1\n0 1 0 0 1\n4 0 1 2 3\n");
+    Model ply = loadModel(dir.filePath("quad.ply"));
+    CHECK(ply.triangleCount() == 2 && ply.hasUV, "PLY (ASCII) with texture coordinates");
+    CHECK(loadModel(dir.filePath("missing.obj"), &err).isEmpty() && !err.isEmpty(), "missing file reports an error");
+
+    // the plugin window: slots follow the document and the preview updates while painting
+    QAction *act = w.action("plugin_modelview");
+    CHECK(act != nullptr, "model preview plugin registered its window");
+    QWidget *panel = w.findChild<QWidget *>("modelview_panel");
+    if (!act || !panel)
+        return;
+    auto *md = new Document(QSize(8, 8), Qt::red);
+    md->resetHistory("New Image", Icons::get("new"));
+    w.addDocument(md, false);
+    act->setChecked(true);
+    bool opened = false;
+    QMetaObject::invokeMethod(panel, "openModel", Q_RETURN_ARG(bool, opened), Q_ARG(QString, dir.filePath("quads.obj")), Q_ARG(bool, false));
+    CHECK(opened, "panel opens the model");
+    QList<QComboBox *> combos = panel->findChildren<QComboBox *>();
+    CHECK(combos.size() == 4, "one colour and one normal slot per material");
+    CHECK(!combos.isEmpty() && combos[0]->currentText() == "(whole image)" && combos[0]->findText("Background") >= 0,
+          "slots default to the whole image and list the layers");
+    QWidget *view = nullptr;
+    for (QWidget *c : panel->findChildren<QWidget *>())
+        if (c->inherits("ModelView::View"))
+            view = c;
+    auto centre = [view] {
+        QImage img = view->grab().toImage();
+        return QColor(img.pixel(img.width() / 2 - img.width() / 8, img.height() / 2));
+    };
+    auto wait = [] {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < 250)
+            QApplication::processEvents();
+    };
+    if (view) {
+        view->resize(240, 200);
+        wait();
+        QColor before = centre();
+        CHECK(before.red() > before.blue() + 40, "preview shows the red image on the model");
+        md->activeImage().fill(QColor(0, 0, 255));
+        md->invalidate();
+        wait();
+        QColor after = centre();
+        CHECK(after.blue() > after.red() + 40, "preview follows edits in real time");
+        shot("10-model-preview");
+    }
+    act->setChecked(false);
+}
+#endif
+
 // Plugins kept outside this repository can add tests: their CMakeLists.txt defines
 // PIXELFORGE_LOCAL_TESTS as a file that implements localPluginTests().
 #ifdef PIXELFORGE_LOCAL_TESTS
@@ -128,6 +255,16 @@ int main(int argc, char **argv)
     drag({50, 80}, {150, 80}, Qt::RightButton);
     CHECK(near(px(100, 80), Qt::white), "right button paints secondary colour (white)");
     w.action("undo")->trigger();
+    w.settings().brushWidth = 20;
+    w.settings().hardness = 0;
+    drag({50, 200}, {150, 200});
+    CHECK(near(px(100, 200), Qt::red, 20), "soft brush is fully opaque in the centre");
+    CHECK(px(100, 205).green() > 60 && px(100, 205).green() < 200, "soft brush fades towards the rim");
+    CHECK(std::abs(px(60, 205).green() - px(100, 205).green()) <= 3 && std::abs(px(140, 205).green() - px(100, 205).green()) <= 3,
+          "overlapping segments of one soft stroke don't build up");
+    CHECK(near(px(100, 211), Qt::white), "nothing outside the brush radius");
+    w.action("undo")->trigger();
+    w.settings().hardness = 100;
 
     std::printf("[selection + move]\n");
     w.setActiveTool(ToolId::RectSelect);
@@ -518,6 +655,10 @@ int main(int argc, char **argv)
             hist->setChecked(false);
         }
     }
+#endif
+
+#ifdef PIXELFORGE_HAVE_MODELVIEW
+    modelViewTests(w);
 #endif
 
 #ifdef PIXELFORGE_LOCAL_TESTS

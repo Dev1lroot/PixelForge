@@ -745,6 +745,18 @@ QToolBar *MainWindow::createOptionsBar()
     connect(plus, &QToolButton::clicked, this, [step] { step(1); });
     sep(OptBrushWidth);
 
+    // brush hardness
+    add(OptHardness, label(tr("Hardness: ")));
+    m_hardness = new ToleranceSlider;
+    m_hardness->setToolTip(tr("Hardness: 100% paints a hard edge, lower values fade the brush out towards its rim"));
+    m_hardness->setValue(m_settings.hardness);
+    connect(m_hardness, &ToleranceSlider::valueChanged, this, [this](int v) {
+        m_settings.hardness = v;
+        m_settings.notify();
+    });
+    add(OptHardness, m_hardness);
+    sep(OptHardness);
+
     // rounded rectangle radius
     add(OptRadius, label(tr("Radius: ")));
     m_radiusSpin = new QSpinBox;
@@ -1450,6 +1462,7 @@ void MainWindow::updateOptionsBar()
     static const char *shapeIcons[] = {"shapeoutline", "shapefill", "shapeboth"};
     m_shapeButton->setIcon(Icons::get(shapeIcons[int(s.shapeType)]));
     m_tolerance->setValue(s.tolerance);
+    m_hardness->setValue(s.hardness);
     {
         QSignalBlocker b(m_fillCombo);
         m_fillCombo->setCurrentIndex(s.fillStyle);

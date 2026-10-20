@@ -38,6 +38,7 @@ enum ToolOption : quint32 {
     OptLineStyle = 1 << 11,
     OptRadius = 1 << 12,
     OptResample = 1 << 13,
+    OptHardness = 1 << 14,
 };
 
 struct ToolEvent {

@@ -18,6 +18,7 @@ class ToolSettings : public QObject
     Q_OBJECT
 public:
     int brushWidth = 2;
+    int hardness = 100;                 // percent: 100 = hard edge, lower = soft falloff
     bool antialias = true;
     bool alphaBlend = true;
     int fillStyle = 0;                  // 0 = solid, otherwise index into hatch list

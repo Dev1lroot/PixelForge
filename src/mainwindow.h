@@ -252,7 +252,7 @@ private:
     // option widgets
     QComboBox *m_brushWidth;
     QToolButton *m_aaButton, *m_blendButton, *m_selModeButton, *m_floodButton, *m_shapeButton;
-    ToleranceSlider *m_tolerance;
+    ToleranceSlider *m_tolerance, *m_hardness;
     QComboBox *m_fillCombo, *m_samplingCombo, *m_sampleLayerCombo, *m_afterPickCombo, *m_lineStyleCombo,
         *m_resampleCombo, *m_fontSizeCombo;
     class QFontComboBox *m_fontCombo;

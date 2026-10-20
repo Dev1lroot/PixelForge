@@ -1370,12 +1370,13 @@ protected:
 
     QColor strokeColor() const { return m_right ? colors().secondary : colors().primary; }
 
-    // paints a round segment into the stroke buffer and composites the touched area
-    void paintSegment(const QPointF &a, const QPointF &b, qreal width, bool aa, CompMode mode,
-                      qreal opacity, bool blend)
+    // adds a round segment's coverage to the stroke buffer's alpha. Hard brushes use QPainter; soft ones
+    // fall off smoothly from the hardness radius to the edge, combined with max() so overlapping
+    // segments of one stroke never build up beyond the brush profile
+    void drawCoverage(const QPointF &a, const QPointF &b, qreal width, bool aa)
     {
-        QRect r = strokeBounds(a, b, width);
-        {
+        const int hardness = settings().hardness;
+        if (hardness >= 100) {
             QPainter p(&m_stroke);
             p.setRenderHint(QPainter::Antialiasing, aa);
             p.setPen(QPen(Qt::black, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
@@ -1386,7 +1387,43 @@ protected:
             } else {
                 p.drawLine(a, b);
             }
+            return;
         }
+        const QRect r = strokeBounds(a, b, width).intersected(m_stroke.rect());
+        if (r.isEmpty())
+            return;
+        const double radius = std::max(0.5, width / 2.0);
+        const double inner = radius * hardness / 100.0;
+        const double dx = b.x() - a.x(), dy = b.y() - a.y();
+        const double len2 = dx * dx + dy * dy;
+        for (int y = r.top(); y <= r.bottom(); ++y) {
+            QRgb *row = reinterpret_cast<QRgb *>(m_stroke.scanLine(y));
+            for (int x = r.left(); x <= r.right(); ++x) {
+                // distance from the pixel centre to the segment
+                double px = x + 0.5 - a.x(), py = y + 0.5 - a.y();
+                double t = len2 > 0 ? std::clamp((px * dx + py * dy) / len2, 0.0, 1.0) : 0.0;
+                double ex = px - t * dx, ey = py - t * dy;
+                double dist = std::sqrt(ex * ex + ey * ey);
+                if (dist >= radius)
+                    continue;
+                double cov = 1.0;
+                if (dist > inner) {
+                    double f = 1.0 - (dist - inner) / (radius - inner);
+                    cov = f * f * (3 - 2 * f);                  // smoothstep
+                }
+                int alpha = int(cov * 255 + 0.5);
+                if (alpha > qAlpha(row[x]))
+                    row[x] = qRgba(0, 0, 0, alpha);            // recoloured / used as a mask afterwards
+            }
+        }
+    }
+
+    // paints a round segment into the stroke buffer and composites the touched area
+    void paintSegment(const QPointF &a, const QPointF &b, qreal width, bool aa, CompMode mode,
+                      qreal opacity, bool blend)
+    {
+        QRect r = strokeBounds(a, b, width);
+        drawCoverage(a, b, width, aa);
         if (mode == CompMode::Normal) {
             // recolour the coverage buffer with the stroke colour
             QPainter p(&m_stroke);
@@ -1412,7 +1449,7 @@ public:
     QString name() const override { return QObject::tr("Paintbrush"); }
     QString iconName() const override { return "brush"; }
     QChar shortcut() const override { return 'B'; }
-    quint32 options() const override { return OptBrushWidth | OptAntialias | OptAlphaBlend; }
+    quint32 options() const override { return OptBrushWidth | OptHardness | OptAntialias | OptAlphaBlend; }
     QString helpText() const override
     {
         return QObject::tr("Paintbrush: Left click to draw with primary color, right click to draw with secondary color");
@@ -1435,7 +1472,7 @@ public:
     QString name() const override { return QObject::tr("Eraser"); }
     QString iconName() const override { return "eraser"; }
     QChar shortcut() const override { return 'E'; }
-    quint32 options() const override { return OptBrushWidth | OptAntialias; }
+    quint32 options() const override { return OptBrushWidth | OptHardness | OptAntialias; }
     QString helpText() const override
     {
         return QObject::tr("Eraser: Click and drag to erase a portion of the image to transparency.");
@@ -1493,7 +1530,7 @@ public:
     QString name() const override { return QObject::tr("Clone Stamp"); }
     QString iconName() const override { return "clonestamp"; }
     QChar shortcut() const override { return 'L'; }
-    quint32 options() const override { return OptBrushWidth | OptAntialias | OptAlphaBlend; }
+    quint32 options() const override { return OptBrushWidth | OptHardness | OptAntialias | OptAlphaBlend; }
     QString helpText() const override
     {
         return QObject::tr("Clone Stamp: Ctrl-click to set origin, then left click to start painting.");
@@ -1553,18 +1590,7 @@ protected:
     {
         qreal width = settings().brushWidth;
         QRect r = strokeBounds(a, b, width).intersected(m_doc->rect());
-        {
-            QPainter p(&m_stroke);
-            p.setRenderHint(QPainter::Antialiasing, settings().antialias);
-            p.setPen(QPen(Qt::black, width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-            if (a == b) {
-                p.setPen(Qt::NoPen);
-                p.setBrush(Qt::black);
-                p.drawEllipse(a, width / 2, width / 2);
-            } else {
-                p.drawLine(a, b);
-            }
-        }
+        drawCoverage(a, b, width, settings().antialias);
         if (r.isEmpty())
             return;
         // temp = (source shifted) masked by stroke coverage
