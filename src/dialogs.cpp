@@ -19,6 +19,8 @@
 #include <QToolButton>
 #include <QDial>
 #include <QPainter>
+#include <QApplication>
+#include <QEventLoop>
 #include <cmath>
 
 // ============================================================ SizeEditor
@@ -503,3 +505,57 @@ SaveOptionsDialog::SaveOptionsDialog(const QString &format, QWidget *parent) : Q
 }
 
 int SaveOptionsDialog::quality() const { return m_q->value(); }
+
+// ============================================================ execUndimmed
+
+namespace {
+class InputBlocker : public QObject
+{
+public:
+    explicit InputBlocker(QDialog *dlg) : m_dlg(dlg) { qApp->installEventFilter(this); }
+    ~InputBlocker() override { qApp->removeEventFilter(this); }
+
+protected:
+    bool eventFilter(QObject *o, QEvent *e) override
+    {
+        switch (e->type()) {
+        case QEvent::MouseButtonPress: case QEvent::MouseButtonRelease: case QEvent::MouseButtonDblClick:
+        case QEvent::Wheel: case QEvent::KeyPress: case QEvent::KeyRelease: case QEvent::ShortcutOverride:
+        case QEvent::TabletPress: case QEvent::TabletRelease: case QEvent::TouchBegin:
+        case QEvent::DragEnter: case QEvent::Drop: case QEvent::Close:
+            break;
+        default:
+            return false;
+        }
+        auto *w = qobject_cast<QWidget *>(o);
+        if (!w)
+            return false;
+        // the dialog's own popups (combo lists, menus) are separate windows parented inside it
+        for (QWidget *p = w; p; p = p->parentWidget())
+            if (p == m_dlg)
+                return false;
+        if (e->type() == QEvent::MouseButtonPress && w->isWindow()) {
+            m_dlg->raise();
+            m_dlg->activateWindow();
+        }
+        e->ignore();
+        return true;
+    }
+
+private:
+    QDialog *m_dlg;
+};
+}
+
+int execUndimmed(QDialog &dlg)
+{
+    dlg.setWindowModality(Qt::NonModal);
+    InputBlocker blocker(&dlg);
+    QEventLoop loop;
+    QObject::connect(&dlg, &QDialog::finished, &loop, &QEventLoop::quit);
+    dlg.show();
+    dlg.raise();
+    dlg.activateWindow();
+    loop.exec(QEventLoop::DialogExec);
+    return dlg.result();
+}

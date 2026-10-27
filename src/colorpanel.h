@@ -22,6 +22,8 @@ public:
 
 signals:
     void hsChanged(double h, double s);
+    void hueChanged(double h);      // Shift-drag: saturation and value kept
+    void valueChanged(double v);    // Ctrl-drag: hue and saturation kept
 
 protected:
     void paintEvent(QPaintEvent *) override;
@@ -30,9 +32,10 @@ protected:
     void resizeEvent(QResizeEvent *) override;
 
 private:
-    void pick(const QPointF &p);
+    void pick(const QPointF &p, Qt::KeyboardModifiers mods);
     void rebuild();
     double m_h = 0, m_s = 0, m_v = 1;
+    QPointF m_lastPos;
     QImage m_cache;
     double m_cacheV = -1;
 };

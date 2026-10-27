@@ -1532,10 +1532,14 @@ protected:
             QPainter p(&m_stroke);
             p.setRenderHint(QPainter::Antialiasing, false);
             p.setPen(QPen(opaque(strokeColor()), 1));
-            if (a == b)
-                p.drawPoint(QPoint(int(a.x()), int(a.y())));
+            // floor, not int(): wrapped tile copies sit at negative coordinates, and truncating -0.5
+            // toward zero would paint pixel 0 when drawing on the bottom or right edge
+            const QPoint pa(int(std::floor(a.x())), int(std::floor(a.y())));
+            const QPoint pb(int(std::floor(b.x())), int(std::floor(b.y())));
+            if (pa == pb)
+                p.drawPoint(pa);
             else
-                p.drawLine(QPoint(int(a.x()), int(a.y())), QPoint(int(b.x()), int(b.y())));
+                p.drawLine(pa, pb);
         }
         compositeTemp(m_doc->activeImage(), m_backup, m_stroke, r, settings().alphaBlend,
                       strokeColor().alphaF(), CompMode::Normal, m_doc);

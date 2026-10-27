@@ -82,6 +82,8 @@ protected:
 
 private:
     void updateScrollBars();
+    void scrollToImagePoint(const QPointF &img, const QPointF &viewPos);
+    QPointF scrollOrigin(const QSize &vp) const;
     void layoutRulers();
     void drawSelection(QPainter &p);
 
@@ -97,6 +99,7 @@ private:
     bool m_panning = false;
     QPoint m_panLast;
     bool m_toolDrag = false;
+    QSize m_vpSize;               // viewport size the scroll position was last laid out for
     void updateMip();
     void drawTile(QPainter &p, const QRect &exposed, const QPointF &origin);
     QPointF tileMargin() const;

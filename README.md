@@ -21,7 +21,17 @@ cmake --build build -j
 ./build/pixelforge [images...]
 ```
 
-Install system-wide (binary, plugins, desktop entry): `sudo cmake --install build`.
+Install (binary, plugins, desktop entry, icon) so PixelForge shows up in the app menu and in
+"Open With" for image files:
+
+```sh
+cmake -S . -B build -DCMAKE_INSTALL_PREFIX=$HOME/.local   # just for you, no sudo
+cmake --build build -j && cmake --install build
+# or system-wide: configure without the prefix (defaults to /usr/local), then sudo cmake --install build
+```
+
+Make it the default for a file type: `xdg-mime default pixelforge.desktop image/png`.
+Uninstall: `xargs rm < build/install_manifest.txt`.
 
 Headless end-to-end test (drives the real tools with synthetic input, optional
 screenshots):

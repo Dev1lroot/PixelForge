@@ -130,3 +130,8 @@ public:
 private:
     QSlider *m_q;
 };
+
+// Runs `dlg` like exec(), but without window modality. Desktop compositors (KWin, Mutter) dim the
+// parent of a modal dialog, which tints the canvas behind a live preview; instead, input to every
+// other window is swallowed until the dialog closes.
+int execUndimmed(QDialog &dlg);

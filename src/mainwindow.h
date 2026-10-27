@@ -161,6 +161,9 @@ private:
     // file
     void fileNew();
     void fileOpen();
+    void addRecentFile(const QString &path);
+    void removeRecentFile(const QString &path);
+    void updateRecentMenu();
     bool fileSave();
     bool fileSaveAs();
     bool saveDocument(Document *doc, const QString &path);
@@ -285,4 +288,6 @@ private:
     const EffectDef *m_lastEffect = nullptr;
     QHash<QString, QVariantMap> m_effectValues;
     QString m_lastDir;
+    QStringList m_recentFiles;
+    QMenu *m_recentMenu = nullptr;
 };

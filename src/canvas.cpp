@@ -152,6 +152,9 @@ CanvasView::CanvasView(Document *doc, MainWindow *main, QWidget *parent)
     });
     m_antsTimer.start(120);
     updateScrollBars();
+    m_vpSize = viewport()->size();
+    scrollToImagePoint(QPointF(m_doc->width() / 2.0, m_doc->height() / 2.0),
+                       QPointF(m_vpSize.width() / 2.0, m_vpSize.height() / 2.0));
 }
 
 QVector<double> CanvasView::zoomPresets()
@@ -165,14 +168,32 @@ QPointF CanvasView::tileMargin() const
     return m_tiled ? QPointF(m_doc->width() * m_zoom, m_doc->height() * m_zoom) : QPointF(0, 0);
 }
 
+// The scrollable area pads the canvas (or tile block) on every side so it can be panned until only
+// kPanKeep pixels of it remain on screen, e.g. to bring a corner out from under a floating panel.
+static const int kPanKeep = 64;
+
+static QPoint panMargin(const QSize &vp)
+{
+    return QPoint(std::max(0, vp.width() - std::min(kPanKeep, vp.width() / 2)),
+                  std::max(0, vp.height() - std::min(kPanKeep, vp.height() / 2)));
+}
+
+// image (0,0) in scroll-area content coordinates for a viewport of size vp
+QPointF CanvasView::scrollOrigin(const QSize &vp) const
+{
+    return tileMargin() + QPointF(panMargin(vp));
+}
+
 QPointF CanvasView::imageOrigin() const
 {
-    const int n = m_tiled ? 3 : 1;
-    const double w = m_doc->width() * m_zoom * n, h = m_doc->height() * m_zoom * n;
-    const QSize vp = viewport()->size();
-    double x = w < vp.width() ? std::floor((vp.width() - w) / 2) : -horizontalScrollBar()->value();
-    double y = h < vp.height() ? std::floor((vp.height() - h) / 2) : -verticalScrollBar()->value();
-    return QPointF(x, y) + tileMargin();
+    return scrollOrigin(viewport()->size()) - QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
+}
+
+void CanvasView::scrollToImagePoint(const QPointF &img, const QPointF &viewPos)
+{
+    const QPointF v = img * m_zoom + scrollOrigin(viewport()->size()) - viewPos;
+    horizontalScrollBar()->setValue(int(std::round(v.x())));
+    verticalScrollBar()->setValue(int(std::round(v.y())));
 }
 
 QPointF CanvasView::viewToImage(const QPointF &v) const
@@ -204,8 +225,9 @@ void CanvasView::updateScrollBars()
     const int w = int(std::ceil(m_doc->width() * m_zoom * n));
     const int h = int(std::ceil(m_doc->height() * m_zoom * n));
     const QSize vp = viewport()->size();
-    horizontalScrollBar()->setRange(0, std::max(0, w - vp.width()));
-    verticalScrollBar()->setRange(0, std::max(0, h - vp.height()));
+    const QPoint m = panMargin(vp);
+    horizontalScrollBar()->setRange(0, std::max(0, w + 2 * m.x() - vp.width()));
+    verticalScrollBar()->setRange(0, std::max(0, h + 2 * m.y() - vp.height()));
     horizontalScrollBar()->setPageStep(vp.width());
     verticalScrollBar()->setPageStep(vp.height());
     horizontalScrollBar()->setSingleStep(std::max(1, vp.width() / 20));
@@ -221,8 +243,7 @@ void CanvasView::setZoom(double z, const QPointF &anchorIn)
     QPointF img = viewToImage(anchor);
     m_zoom = z;
     updateScrollBars();
-    horizontalScrollBar()->setValue(int(std::round(img.x() * z + tileMargin().x() - anchor.x())));
-    verticalScrollBar()->setValue(int(std::round(img.y() * z + tileMargin().y() - anchor.y())));
+    scrollToImagePoint(img, anchor);
     viewport()->update();
     m_hruler->update();
     m_vruler->update();
@@ -271,9 +292,7 @@ void CanvasView::zoomToRect(const QRectF &r)
     z = std::clamp(z, 0.01, 36.0);
     m_zoom = z;
     updateScrollBars();
-    QPointF c = r.center();
-    horizontalScrollBar()->setValue(int(c.x() * z + tileMargin().x() - vp.width() / 2.0));
-    verticalScrollBar()->setValue(int(c.y() * z + tileMargin().y() - vp.height() / 2.0));
+    scrollToImagePoint(r.center(), QPointF(vp.width() / 2.0, vp.height() / 2.0));
     viewport()->update();
     m_hruler->update();
     m_vruler->update();
@@ -294,8 +313,7 @@ void CanvasView::setTiled(bool on)
     QPointF img = viewToImage(centre);
     m_tiled = on;
     updateScrollBars();
-    horizontalScrollBar()->setValue(int(std::round(img.x() * m_zoom + tileMargin().x() - centre.x())));
-    verticalScrollBar()->setValue(int(std::round(img.y() * m_zoom + tileMargin().y() - centre.y())));
+    scrollToImagePoint(img, centre);
     viewport()->update();
     m_hruler->update();
     m_vruler->update();
@@ -344,7 +362,19 @@ void CanvasView::updateImageRect(const QRectF &r)
 void CanvasView::resizeEvent(QResizeEvent *e)
 {
     QAbstractScrollArea::resizeEvent(e);
-    updateScrollBars();
+    // also reached for viewport-only resizes (scroll bars, rulers): keep the image point at the centre
+    // of the view where it was, which also keeps a small canvas centred as the window grows
+    const QSize vp = viewport()->size();
+    if (vp != m_vpSize) {
+        const QPointF oldCentre(m_vpSize.width() / 2.0, m_vpSize.height() / 2.0);
+        const QPointF origin = scrollOrigin(m_vpSize) - QPointF(horizontalScrollBar()->value(), verticalScrollBar()->value());
+        const QPointF img = (oldCentre - origin) / m_zoom;
+        m_vpSize = vp;
+        updateScrollBars();
+        scrollToImagePoint(img, QPointF(vp.width() / 2.0, vp.height() / 2.0));
+    } else {
+        updateScrollBars();
+    }
     layoutRulers();
 }
 

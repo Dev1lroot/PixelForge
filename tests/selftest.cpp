@@ -7,6 +7,8 @@
 #include "ora.h"
 #include "icons.h"
 #include "animpanel.h"
+#include "colorpanel.h"
+#include "dialogs.h"
 
 #include <QApplication>
 #include <QAction>
@@ -23,6 +25,8 @@
 #include <QSplitter>
 #include <QLabel>
 #include <QPainter>
+#include <QTimer>
+#include <QScrollBar>
 #include <cstdio>
 
 static int g_fail = 0, g_pass = 0;
@@ -639,6 +643,57 @@ int main(int argc, char **argv)
     d->invalidate();
     w.action("fx:Invert Colors")->trigger();
     CHECK(d->history().last().name == "Invert Colors", "adjustment from menu adds history");
+    for (const EffectDef &def : effectRegistry()) {
+        if (def.name != "Black and Alpha")
+            continue;
+        QImage src(4, 1, QImage::Format_ARGB32), dst(4, 1, QImage::Format_ARGB32);
+        src.setPixel(0, 0, qRgba(255, 255, 255, 255));
+        src.setPixel(1, 0, qRgba(128, 128, 128, 255));
+        src.setPixel(2, 0, qRgba(0, 0, 0, 255));
+        src.setPixel(3, 0, qRgba(0, 0, 0, 100));
+        def.apply(src, dst, src.rect(), {});
+        CHECK(dst.pixel(0, 0) == qRgba(0, 0, 0, 0) && dst.pixel(1, 0) == qRgba(0, 0, 0, 127) &&
+              dst.pixel(2, 0) == qRgba(0, 0, 0, 255) && dst.pixel(3, 0) == qRgba(0, 0, 0, 100),
+              "Black and Alpha: white turns transparent, darkness becomes opacity of black");
+    }
+
+    std::printf("[colour wheel modifiers]\n");
+    if (ColorWheel *wheel = w.findChild<ColorWheel *>()) {
+        auto drag = [wheel](QPointF from, QPointF to, Qt::KeyboardModifiers m) {
+            QMouseEvent press(QEvent::MouseButtonPress, from, wheel->mapToGlobal(from), Qt::LeftButton, Qt::LeftButton, m);
+            QApplication::sendEvent(wheel, &press);
+            QMouseEvent move(QEvent::MouseMove, to, wheel->mapToGlobal(to), Qt::NoButton, Qt::LeftButton, m);
+            QApplication::sendEvent(wheel, &move);
+        };
+        const QPointF c(wheel->width() / 2.0, wheel->height() / 2.0);
+        const double r = std::min(wheel->width(), wheel->height()) / 2.0 - 1;
+        drag(c + QPointF(r / 2, 0), c + QPointF(r / 2, 0), {});            // red, half saturation
+        QColor before = w.colors().primary;
+        drag(c, c - QPointF(0, r * 0.9), Qt::ShiftModifier);               // drag up: hue to 90
+        QColor tint = w.colors().primary;
+        CHECK(std::abs(tint.hsvHueF() * 360 - 90) < 2 && std::abs(tint.hsvSaturationF() - before.hsvSaturationF()) < 0.01 &&
+              std::abs(tint.valueF() - before.valueF()) < 0.01, "Shift-drag changes the hue only");
+        drag(c, c + QPointF(r * 0.3, r), Qt::ControlModifier);             // drag down one radius: half as bright
+        QColor light = w.colors().primary;
+        CHECK(std::abs(light.valueF() - (tint.valueF() - 0.5)) < 0.02 && std::abs(light.hsvHueF() - tint.hsvHueF()) < 0.01 &&
+              std::abs(light.hsvSaturationF() - tint.hsvSaturationF()) < 0.02, "Ctrl-drag changes the lightness only");
+    } else {
+        CHECK(false, "colour wheel found");
+    }
+
+    std::printf("[preview dialogs]\n");
+    {
+        QDialog dlg(&w);
+        bool nonModal = false, blocked = false;
+        QTimer::singleShot(0, &dlg, [&] {
+            nonModal = !dlg.isModal() && dlg.isVisible();
+            QKeyEvent key(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier);
+            blocked = QApplication::sendEvent(&w, &key);
+            dlg.accept();
+        });
+        CHECK(execUndimmed(dlg) == QDialog::Accepted && nonModal && blocked,
+              "preview dialogs are not modal (no compositor dimming) but still block the main window");
+    }
 
     std::printf("[openraster round trip]\n");
     w.action("layeradd")->trigger();
@@ -752,10 +807,55 @@ int main(int argc, char **argv)
         w.settings().shapeType = ShapeType::Filled;
         drag({-15, 30}, {15, 60});
         CHECK(near(px(2, 45), QColor(255, 0, 0)) && near(px(97, 45), QColor(255, 0, 0)), "shape across the left edge wraps");
+        {
+            // painting on the bottom row / right column must not leak onto row 0 / column 0
+            QImage &img = td->activeImage();
+            img.fill(Qt::white);
+            td->invalidate();
+            w.colors().setPrimary(Qt::black);
+            bool clean = true;
+            for (ToolId tool : {ToolId::Pencil, ToolId::Brush}) {
+                w.setActiveTool(tool);
+                w.settings().brushWidth = 1;
+                w.settings().antialias = false;
+                drag({50.5, 79.5}, {60.5, 79.5});            // bottom row
+                drag({99.5, 30.5}, {99.5, 40.5});            // right column
+                CHECK(near(px(55, 79), Qt::black) && near(px(99, 35), Qt::black), "edge strokes land on the edge");
+                for (int x = 0; x < 100; ++x)
+                    clean &= near(px(x, 0), Qt::white);
+                for (int y = 0; y < 80; ++y)
+                    clean &= near(px(0, y), Qt::white);
+                img.fill(Qt::white);
+                td->invalidate();
+            }
+            w.settings().antialias = true;
+            CHECK(clean, "1px strokes on the bottom/right edge do not paint the first row/column");
+        }
         shot("09-tile-view");
         w.action("tileview")->trigger();
         CHECK(!w.view()->tiled(), "tile preview toggles off");
         w.setActiveTool(ToolId::Brush);
+    }
+
+    std::printf("[canvas panning]\n");
+    {
+        CanvasView *v = w.view();
+        v->setZoom(1.0);
+        QScrollBar *hb = v->horizontalScrollBar(), *vb = v->verticalScrollBar();
+        hb->setValue(hb->minimum());
+        vb->setValue(vb->minimum());
+        QPointF tl = v->imageToView(QPointF(0, 0));
+        CHECK(tl.x() > v->viewport()->width() / 2 && tl.y() > v->viewport()->height() / 2,
+              "canvas can be panned with its top-left corner deep into the view");
+        hb->setValue(hb->maximum());
+        vb->setValue(vb->maximum());
+        QPointF br = v->imageToView(QPointF(v->document()->width(), v->document()->height()));
+        CHECK(br.x() > 0 && br.x() < v->viewport()->width() / 2 && br.y() > 0 && br.y() < v->viewport()->height() / 2,
+              "canvas can be panned with its bottom-right corner past the middle, part of it still on screen");
+        v->zoomToWindow();
+        QPointF c = v->imageToView(QPointF(v->document()->width() / 2.0, v->document()->height() / 2.0));
+        CHECK(std::abs(c.x() - v->viewport()->width() / 2.0) <= 1 && std::abs(c.y() - v->viewport()->height() / 2.0) <= 1,
+              "zoom to window centres the canvas");
     }
 
     std::printf("[normal maps]\n");

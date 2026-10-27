@@ -36,6 +36,7 @@
 #include <QDropEvent>
 #include <QSettings>
 #include <QFileInfo>
+#include <QDir>
 #include <QStandardPaths>
 #include <QPrinter>
 #include <QPrintDialog>
@@ -243,12 +244,13 @@ void ImageTabs::leaveEvent(QEvent *)
 
 MainWindow::MainWindow()
 {
-    setWindowIcon(Icons::get("brush"));
+    setWindowIcon(QIcon::fromTheme("pixelforge", Icons::get("brush")));
     setAcceptDrops(true);
     m_tools = createTools(this);
     QSettings s(kAppName, kAppName);
     m_lastDir = s.value("lastDir", QStandardPaths::writableLocation(QStandardPaths::PicturesLocation)).toString();
     m_settings.units = Units(s.value("units", 0).toInt());
+    m_recentFiles = s.value("recentFiles").toStringList();
 
     createActions();
     applyStyle();
@@ -458,6 +460,8 @@ QWidget *MainWindow::createTopArea()
 
     QMenu *file = mb->addMenu(tr("&File"));
     file->addActions({A("new"), A("open")});
+    m_recentMenu = file->addMenu(Icons::get("open"), tr("Open &Recent"));
+    updateRecentMenu();
     file->addSeparator();
     file->addActions({A("close")});
     file->addSeparator();
@@ -1592,6 +1596,61 @@ void MainWindow::fileOpen()
         openFile(f);
 }
 
+static const int kMaxRecentFiles = 10;
+
+void MainWindow::addRecentFile(const QString &path)
+{
+    const QString abs = QFileInfo(path).absoluteFilePath();
+    m_recentFiles.removeAll(abs);
+    m_recentFiles.prepend(abs);
+    while (m_recentFiles.size() > kMaxRecentFiles)
+        m_recentFiles.removeLast();
+    QSettings(kAppName, kAppName).setValue("recentFiles", m_recentFiles);
+    updateRecentMenu();
+}
+
+void MainWindow::removeRecentFile(const QString &path)
+{
+    if (!m_recentFiles.removeAll(path))
+        return;
+    QSettings(kAppName, kAppName).setValue("recentFiles", m_recentFiles);
+    updateRecentMenu();
+}
+
+void MainWindow::updateRecentMenu()
+{
+    if (!m_recentMenu)
+        return;
+    m_recentMenu->clear();
+    for (int i = 0; i < m_recentFiles.size(); ++i) {
+        const QString path = m_recentFiles[i];
+        // number the first nine for keyboard access, like most editors
+        QString label = QFileInfo(path).fileName();
+        label.replace('&', "&&");
+        if (i < 9)
+            label = QString("&%1  %2").arg(i + 1).arg(label);
+        QAction *a = m_recentMenu->addAction(label, this, [this, path] {
+            if (!QFileInfo::exists(path)) {
+                QMessageBox::warning(this, kAppName, tr("%1 no longer exists.").arg(QDir::toNativeSeparators(path)));
+                removeRecentFile(path);
+                return;
+            }
+            openFile(path);
+        });
+        a->setToolTip(QDir::toNativeSeparators(path));
+        a->setStatusTip(QDir::toNativeSeparators(path));
+    }
+    if (!m_recentFiles.isEmpty())
+        m_recentMenu->addSeparator();
+    QAction *clear = m_recentMenu->addAction(tr("&Clear Recent"), this, [this] {
+        m_recentFiles.clear();
+        QSettings(kAppName, kAppName).remove("recentFiles");
+        updateRecentMenu();
+    });
+    clear->setEnabled(!m_recentFiles.isEmpty());
+    m_recentMenu->setToolTipsVisible(true);
+}
+
 void MainWindow::openFile(const QString &path)
 {
     QFileInfo fi(path);
@@ -1629,6 +1688,7 @@ void MainWindow::openFile(const QString &path)
             doc->dpi = img.dotsPerMeterX() * 0.0254;
     }
     doc->filePath = fi.absoluteFilePath();
+    addRecentFile(doc->filePath);
     doc->resetHistory(tr("Open Image"), Icons::get("open"));
     // replace a pristine untitled document, as the classic editor does
     if (m_docs.size() == 1 && m_docs[0]->filePath.isEmpty() && !m_docs[0]->isDirty() && m_docs[0]->history().size() == 1) {
@@ -1749,6 +1809,7 @@ bool MainWindow::saveDocument(Document *d, const QString &path)
     }
     d->filePath = fi.absoluteFilePath();
     d->markSaved();
+    addRecentFile(d->filePath);
     updateTitle();
     m_tabs->refresh();
     return true;
@@ -2341,7 +2402,7 @@ void MainWindow::layerRotateZoom()
     if (!d) return;
     commitTool();
     RotateZoomDialog dlg(d, this);
-    if (dlg.exec() == QDialog::Accepted)
+    if (execUndimmed(dlg) == QDialog::Accepted)
         d->pushHistory(tr("Rotate / Zoom Layer"), Icons::get("rotatezoom"));
 }
 
@@ -2367,7 +2428,7 @@ void MainWindow::layerCreateNormalMap()
     d->setLayers(layers, d->size(), active + 1);
     EffectDialog dlg(this, d, *def, m_effectValues.value(def->name), this);
     dlg.setWindowTitle(tr("Create Normal Map Layer"));
-    if (dlg.exec() != QDialog::Accepted) {
+    if (execUndimmed(dlg) != QDialog::Accepted) {
         d->setLayers(before, d->size(), active);
         return;
     }
@@ -2381,7 +2442,7 @@ void MainWindow::showLayerProperties()
     if (!d) return;
     commitTool();
     LayerPropertiesDialog dlg(d, this);
-    if (dlg.exec() == QDialog::Accepted && dlg.changed())
+    if (execUndimmed(dlg) == QDialog::Accepted && dlg.changed())
         d->pushHistory(tr("Layer Properties"), Icons::get("layerprops"));
 }
 
@@ -2419,7 +2480,7 @@ void MainWindow::runEffectDef(const EffectDef &def, bool repeat)
     QVariantMap values = m_effectValues.value(def.name);
     if (!def.params.isEmpty() && !repeat) {
         EffectDialog dlg(this, d, def, values, this);
-        if (dlg.exec() != QDialog::Accepted)
+        if (execUndimmed(dlg) != QDialog::Accepted)
             return;
         values = dlg.values();
     } else {

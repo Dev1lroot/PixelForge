@@ -939,6 +939,14 @@ void drawIcon(QPainter &p, const QString &n)
         p.setPen(QPen(QColor(60, 60, 60), 0.8));
         p.setBrush(g);
         p.drawRect(QRectF(1.5, 2.5, 13, 11));
+    } else if (n == "blackalpha") {
+        QLinearGradient g(0, 0, 16, 0);
+        g.setColorAt(0, Qt::black);
+        g.setColorAt(1, Qt::transparent);
+        p.drawPixmap(QRect(2, 3, 12, 10), Icons::checkerboard(2));
+        p.setPen(QPen(QColor(60, 60, 60), 0.8));
+        p.setBrush(g);
+        p.drawRect(QRectF(1.5, 2.5, 13, 11));
     } else if (n == "sepia") {
         QLinearGradient g(0, 0, 16, 0);
         g.setColorAt(0, QColor(60, 40, 20));

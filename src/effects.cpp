@@ -267,6 +267,12 @@ static void fxBlackWhite(const QImage &s, QImage &d, const QRect &r, const QVari
     perPixel(s, d, r, [](QRgb p, int, int) { int l = lum(p); return qRgba(l, l, l, qAlpha(p)); });
 }
 
+// greyscale, then white becomes transparent: every pixel is black, its darkness kept as opacity
+static void fxBlackAlpha(const QImage &s, QImage &d, const QRect &r, const QVariantMap &)
+{
+    perPixel(s, d, r, [](QRgb p, int, int) { return qRgba(0, 0, 0, (255 - lum(p)) * qAlpha(p) / 255); });
+}
+
 static void fxSepia(const QImage &s, QImage &d, const QRect &r, const QVariantMap &)
 {
     perPixel(s, d, r, [](QRgb p, int, int) {
@@ -1073,6 +1079,7 @@ const QVector<EffectDef> &effectRegistry()
     using QO = QObject;
     adj(QO::tr("Auto-Level"), "autolevel", QKeySequence("Ctrl+Shift+L"), {}, fxAutoLevel);
     adj(QO::tr("Black and White"), "blackwhite", QKeySequence("Ctrl+Shift+G"), {}, fxBlackWhite);
+    adj(QO::tr("Black and Alpha"), "blackalpha", QKeySequence(), {}, fxBlackAlpha);
     adj(QO::tr("Brightness / Contrast"), "brightness", QKeySequence(),
         {P("brightness", QO::tr("Brightness"), -100, 100, 0), P("contrast", QO::tr("Contrast"), -100, 100, 0)}, fxBrightnessContrast);
     {

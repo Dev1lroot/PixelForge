@@ -28,6 +28,8 @@ ColorWheel::ColorWheel(QWidget *parent) : QWidget(parent)
 {
     setMinimumSize(110, 110);
     setCursor(Qt::CrossCursor);
+    setToolTip(tr("Click or drag to pick hue and saturation.\n"
+                  "Shift+drag: change the hue only.\nCtrl+drag up/down: change the lightness only."));
 }
 
 void ColorWheel::setHsv(double h, double s, double v)
@@ -92,27 +94,46 @@ void ColorWheel::paintEvent(QPaintEvent *)
     p.drawRect(QRectF(m.x() - 2, m.y() - 2, 4, 4));
 }
 
-void ColorWheel::pick(const QPointF &pt)
+void ColorWheel::pick(const QPointF &pt, Qt::KeyboardModifiers mods)
 {
     int side = std::min(width(), height());
     QPointF c(width() / 2.0, height() / 2.0);
     double r = side / 2.0 - 1;
+    const QPointF delta = pt - m_lastPos;
+    m_lastPos = pt;
+    if (mods & Qt::ControlModifier) {
+        // lightness only: dragging up brightens, down darkens; one wheel diameter spans black to full
+        m_v = std::clamp(m_v - delta.y() / (2 * r), 0.0, 1.0);
+        update();
+        emit valueChanged(m_v);
+        return;
+    }
     double dx = pt.x() - c.x(), dy = pt.y() - c.y();
     double h = std::atan2(-dy, dx) * 180 / M_PI;
     if (h < 0)
         h += 360;
-    double s = std::min(1.0, std::sqrt(dx * dx + dy * dy) / r);
     m_h = h;
-    m_s = s;
+    if (mods & Qt::ShiftModifier) {
+        // tint only: the marker slides around its ring, saturation and lightness stay put
+        update();
+        emit hueChanged(h);
+        return;
+    }
+    m_s = std::min(1.0, std::sqrt(dx * dx + dy * dy) / r);
     update();
-    emit hsChanged(h, s);
+    emit hsChanged(h, m_s);
 }
 
-void ColorWheel::mousePressEvent(QMouseEvent *e) { pick(e->position()); }
+void ColorWheel::mousePressEvent(QMouseEvent *e)
+{
+    m_lastPos = e->position();
+    pick(e->position(), e->modifiers());
+}
+
 void ColorWheel::mouseMoveEvent(QMouseEvent *e)
 {
     if (e->buttons())
-        pick(e->position());
+        pick(e->position(), e->modifiers());
 }
 
 // ============================================================ SwatchWidget
@@ -419,6 +440,14 @@ ColorsPanel::ColorsPanel(ColorState *cs, QWidget *parent) : QWidget(parent), m_c
             m_v = 1.0;                           // picking a hue on black should show it
         QColor c = QColor::fromHsvF(m_h / 360.0, m_s, m_v, currentColor().alphaF());
         setCurrentColor(c);
+    });
+    connect(m_wheel, &ColorWheel::hueChanged, this, [this](double h) {
+        m_h = h;
+        setCurrentColor(QColor::fromHsvF(m_h / 360.0, m_s, m_v, currentColor().alphaF()));
+    });
+    connect(m_wheel, &ColorWheel::valueChanged, this, [this](double v) {
+        m_v = v;
+        setCurrentColor(QColor::fromHsvF(m_h / 360.0, m_s, m_v, currentColor().alphaF()));
     });
     connect(m_hex, &QLineEdit::editingFinished, this, [this] {
         QString t = m_hex->text();
