@@ -522,6 +522,21 @@ static void fxTwist(const QImage &s, QImage &d, const QRect &r, const QVariantMa
     });
 }
 
+static void fxWobble(const QImage &s, QImage &d, const QRect &r, const QVariantMap &p)
+{
+    double amp = p["amplitude"].toDouble();
+    double k = 2 * M_PI / std::max(1.0, p["wavelength"].toDouble());
+    double phase = p["phase"].toDouble() * M_PI / 180;
+    int dir = p["direction"].toInt(); // 0 both, 1 horizontal, 2 vertical
+    bool wx = dir != 2, wy = dir != 1;
+    warp(s, d, r, [&](double x, double y) {
+        double lx = x - r.left(), ly = y - r.top();
+        double ox = wx ? amp * std::sin(ly * k + phase) : 0;
+        double oy = wy ? amp * std::sin(lx * k + phase + M_PI / 2) : 0;
+        return QPointF(x + ox, y + oy);
+    });
+}
+
 static void fxPolarInversion(const QImage &s, QImage &d, const QRect &r, const QVariantMap &p)
 {
     double amount = p["amount"].toDouble();
@@ -1122,6 +1137,9 @@ const QVector<EffectDef> &effectRegistry()
     fx("Distort", QO::tr("Pixelate"), {P("size", QO::tr("Cell size"), 1, 100, 2)}, fxPixelate);
     fx("Distort", QO::tr("Polar Inversion"), {P("amount", QO::tr("Amount"), 0.1, 4, 1, EffectParam::Double, 2)}, fxPolarInversion);
     fx("Distort", QO::tr("Twist"), {P("amount", QO::tr("Amount"), -100, 100, 30)}, fxTwist);
+    fx("Distort", QO::tr("Wobble"), {P("amplitude", QO::tr("Amplitude"), 0, 100, 8), P("wavelength", QO::tr("Wavelength"), 2, 500, 60),
+                                      P("phase", QO::tr("Phase"), 0, 360, 0, EffectParam::Angle),
+                                      C("direction", QO::tr("Direction"), {QO::tr("Both"), QO::tr("Horizontal"), QO::tr("Vertical")})}, fxWobble);
 
     fx("Noise", QO::tr("Add Noise"), {P("intensity", QO::tr("Intensity"), 0, 100, 64), P("saturation", QO::tr("Color saturation"), 0, 400, 100),
                                        P("coverage", QO::tr("Coverage"), 0, 100, 100), seed()}, fxAddNoise);

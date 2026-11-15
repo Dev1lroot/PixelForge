@@ -91,7 +91,7 @@ Hue/Saturation, Invert Colors, Levels, Posterize, Sepia.
 
 **Effects** — Artistic (Ink Sketch, Oil Painting, Pencil Sketch), Blurs (Fragment,
 Gaussian, Motion, Radial, Unfocus, Zoom), Distort (Bulge, Frosted Glass, Pixelate,
-Polar Inversion, Twist), Noise (Add Noise, Median), Photo (Glow, Red Eye Removal,
+Polar Inversion, Twist, Wobble), Noise (Add Noise, Median), Photo (Glow, Red Eye Removal,
 Sharpen, Soften Portrait, Vignette), Render (Clouds, Julia, Mandelbrot), Stylize
 (Edge Detect, Emboss, Outline, Relief). Ctrl+F repeats the last effect.
 
