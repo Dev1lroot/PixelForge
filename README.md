@@ -62,7 +62,7 @@ position and zoom.
 | K | Color Picker (1×1…9×9 sampling, layer or image, after-pick action) |
 | L / R | Clone Stamp (Ctrl+click sets source) / Recolor |
 | T | Text (font, size, B/I/U/S, alignment, movable while editing) |
-| O | Line/Curve (drag handles or the line to bend, Enter to finish), Rectangle, Rounded Rectangle, Ellipse, Freeform Shape |
+| O | Line/Curve (drag handles or the line to bend, Enter to finish), Rectangle, Polygon (angle count + corner rounding), Ellipse, Freeform Shape — shapes stay in a transform box (drag, resize, right-drag to rotate) until Enter or a click outside |
 
 Paintbrush, Eraser and Clone Stamp have a **Hardness** slider next to the brush width:
 100% paints a hard edge, lower values fade the brush out smoothly towards its rim
@@ -89,7 +89,7 @@ layer / new image; select all, deselect, invert, erase and fill selection.
 **Adjustments** — Auto-Level, Black and White, Brightness/Contrast, Curves,
 Hue/Saturation, Invert Colors, Levels, Posterize, Sepia.
 
-**Effects** — Artistic (Ink Sketch, Oil Painting, Pencil Sketch), Blurs (Fragment,
+**Effects** — Artistic (Engraving, Halftone, Ink Sketch, Oil Painting, Pencil Sketch), Blurs (Fragment,
 Gaussian, Motion, Radial, Unfocus, Zoom), Distort (Bulge, Frosted Glass, Pixelate,
 Polar Inversion, Twist, Wobble), Noise (Add Noise, Median), Photo (Glow, Red Eye Removal,
 Sharpen, Soften Portrait, Vignette), Render (Clouds, Julia, Mandelbrot), Stylize

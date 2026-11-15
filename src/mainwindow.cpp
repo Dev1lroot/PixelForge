@@ -768,17 +768,53 @@ QToolBar *MainWindow::createOptionsBar()
     add(OptHardness, m_hardness);
     sep(OptHardness);
 
-    // rounded rectangle radius
-    add(OptRadius, label(tr("Radius: ")));
-    m_radiusSpin = new QSpinBox;
-    m_radiusSpin->setRange(0, 1000);
-    m_radiusSpin->setValue(m_settings.radius);
-    connect(m_radiusSpin, qOverload<int>(&QSpinBox::valueChanged), this, [this](int v) {
-        m_settings.radius = v;
-        m_settings.notify();
-    });
-    add(OptRadius, m_radiusSpin);
-    sep(OptRadius);
+    // "label  − [value] +" groups like Brush width, for integer shape settings
+    auto stepper = [&](quint32 opt, const QString &text, const QString &tip, int *field, int lo, int hi,
+                       std::initializer_list<int> presets) {
+        add(opt, label(text));
+        auto *dec = new QToolButton;
+        dec->setText(QString::fromUtf8("−"));
+        dec->setAutoRaise(true);
+        dec->setFixedSize(18, 18);
+        add(opt, dec);
+        auto *box = new QComboBox;
+        box->setEditable(true);
+        box->setFixedWidth(56);
+        box->setToolTip(tip);
+        for (int v : presets)
+            box->addItem(QString::number(v));
+        box->setValidator(new QIntValidator(lo, hi, box));
+        box->setEditText(QString::number(*field));
+        add(opt, box);
+        auto *inc = new QToolButton;
+        inc->setText("+");
+        inc->setAutoRaise(true);
+        inc->setFixedSize(18, 18);
+        add(opt, inc);
+        connect(box, &QComboBox::currentTextChanged, this, [this, field, lo, hi](const QString &t) {
+            bool ok;
+            int v = t.toInt(&ok);
+            if (ok && v >= lo && v <= hi && v != *field) {
+                *field = v;
+                m_settings.notify();
+            }
+        });
+        auto bump = [this, field, lo, hi](int dir) {
+            const int v = std::clamp(*field + dir, lo, hi);
+            if (v != *field) {
+                *field = v;
+                m_settings.notify();
+            }
+        };
+        connect(dec, &QToolButton::clicked, this, [bump] { bump(-1); });
+        connect(inc, &QToolButton::clicked, this, [bump] { bump(1); });
+        sep(opt);
+        return box;
+    };
+    m_sidesCombo = stepper(OptSides, tr("Angles: "), tr("Number of corners of the polygon (4 = rectangle)"),
+                           &m_settings.polygonSides, 3, 100, {3, 4, 5, 6, 7, 8, 9, 10, 12, 16, 20, 24, 32});
+    m_radiusCombo = stepper(OptRadius, tr("Corner rounding: "), tr("Radius in pixels each corner is rounded by"),
+                            &m_settings.radius, 0, 2000, {0, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 40, 50, 75, 100});
 
     // font
     add(OptFont, label(tr("Font: ")));
@@ -1474,6 +1510,11 @@ void MainWindow::updateOptionsBar()
     m_floodButton->setToolTip(floodNames[int(s.floodMode)]);
     static const char *shapeIcons[] = {"shapeoutline", "shapefill", "shapeboth"};
     m_shapeButton->setIcon(Icons::get(shapeIcons[int(s.shapeType)]));
+    for (auto [box, v] : {std::pair{m_sidesCombo, s.polygonSides}, std::pair{m_radiusCombo, s.radius}}) {
+        QSignalBlocker b(box);
+        if (box->currentText() != QString::number(v))
+            box->setEditText(QString::number(v));
+    }
     m_tolerance->setValue(s.tolerance);
     m_hardness->setValue(s.hardness);
     {

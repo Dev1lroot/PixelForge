@@ -460,10 +460,15 @@ void drawIcon(QPainter &p, const QString &n)
         p.setPen(QPen(QColor(20, 40, 90), 1));
         p.setBrush(vgrad(3, 13, QColor(120, 170, 240), QColor(50, 100, 200)));
         p.drawRect(QRectF(1.5, 3.5, 13, 9));
-    } else if (n == "roundrect") {
-        p.setPen(QPen(QColor(20, 40, 90), 1));
-        p.setBrush(vgrad(3, 13, QColor(120, 170, 240), QColor(50, 100, 200)));
-        p.drawRoundedRect(QRectF(1.5, 3.5, 13, 9), 3.5, 3.5);
+    } else if (n == "polygon") {
+        QPolygonF pent;
+        for (int i = 0; i < 5; ++i) {
+            const double a = -M_PI / 2 + i * 2 * M_PI / 5;
+            pent << QPointF(8 + 6.8 * std::cos(a), 8.6 + 6.8 * std::sin(a));
+        }
+        p.setPen(QPen(QColor(20, 40, 90), 1, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        p.setBrush(vgrad(2, 14, QColor(120, 170, 240), QColor(50, 100, 200)));
+        p.drawPolygon(pent);
     } else if (n == "ellipse") {
         p.setPen(QPen(QColor(20, 40, 90), 1));
         p.setBrush(vgrad(3, 13, QColor(120, 170, 240), QColor(50, 100, 200)));

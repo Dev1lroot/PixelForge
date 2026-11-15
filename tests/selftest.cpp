@@ -548,8 +548,45 @@ int main(int argc, char **argv)
     drag({50, 50}, {150, 120});
     CHECK(near(px(100, 85), QColor(0, 200, 0)) && near(px(50, 85), QColor(200, 0, 0), 30), "rectangle: outline primary, fill secondary");
     w.setActiveTool(ToolId::Ellipse);
+    const QImage beforeShapes = w.document()->activeImage().copy();
+    auto bg = [&](int x, int y) { return QColor::fromRgba(beforeShapes.pixel(x, y)); };
     drag({200, 50}, {300, 150}, Qt::LeftButton, Qt::ShiftModifier);
     CHECK(near(px(250, 100), QColor(0, 200, 0)), "ellipse with shift");
+    CHECK(w.tool(ToolId::Ellipse)->isEditing(), "a drawn shape stays live in its transform box");
+    drag({250, 100}, {270, 100});                // drag inside the box: moves the shape
+    CHECK(near(px(270, 100), QColor(0, 200, 0)) && near(px(205, 100), bg(205, 100)), "dragging the box moves the shape");
+    w.colors().setSecondary(QColor(0, 0, 200));
+    CHECK(near(px(270, 100), QColor(0, 0, 200)), "a live shape follows color changes");
+    key(Qt::Key_Return);
+    CHECK(!w.tool(ToolId::Ellipse)->isEditing(), "enter finishes the shape");
+    w.colors().setSecondary(QColor(0, 200, 0));
+    CHECK(near(px(270, 100), QColor(0, 0, 200)), "a finished shape no longer changes");
+    w.action("undo")->trigger();
+    CHECK(near(px(250, 100), bg(250, 100)) && near(px(270, 100), bg(270, 100)), "undoing removes the edited shape in one step");
+
+    // polygon: sides and corner rounding are live options of the shape still in its box
+    w.setActiveTool(ToolId::Polygon);
+    w.settings().shapeType = ShapeType::Filled;
+    w.settings().polygonSides = 3;
+    w.settings().radius = 0;
+    w.settings().notify();
+    drag({250, 170}, {350, 270});
+    CHECK(near(px(300, 265), QColor(200, 0, 0)) && near(px(255, 180), bg(255, 180)), "triangle: flat bottom, empty top corner");
+    w.settings().polygonSides = 4;
+    w.settings().notify();
+    CHECK(near(px(253, 173), QColor(200, 0, 0)), "4 sides fill the whole box like a rectangle");
+    w.settings().radius = 30;
+    w.settings().notify();
+    CHECK(near(px(252, 172), bg(252, 172)) && near(px(300, 220), QColor(200, 0, 0)), "corner rounding cuts the corners");
+    // rotate by right-dragging inside the box
+    drag({340, 220}, {300, 180}, Qt::RightButton, Qt::ShiftModifier);
+    CHECK(w.tool(ToolId::Polygon)->isEditing() && near(px(300, 220), QColor(200, 0, 0)), "rotating keeps the shape live");
+    shot("03b-polygon-box");
+    key(Qt::Key_Return);
+    w.settings().shapeType = ShapeType::FilledOutline;
+    w.settings().radius = 0;
+    w.settings().polygonSides = 5;
+    w.action("undo")->trigger();
     w.setActiveTool(ToolId::Line);
     drag({20, 200}, {380, 200});
     CHECK(near(px(200, 200), QColor(200, 0, 0)), "line drawn");
@@ -655,6 +692,68 @@ int main(int argc, char **argv)
         CHECK(dst.pixel(0, 0) == qRgba(0, 0, 0, 0) && dst.pixel(1, 0) == qRgba(0, 0, 0, 127) &&
               dst.pixel(2, 0) == qRgba(0, 0, 0, 255) && dst.pixel(3, 0) == qRgba(0, 0, 0, 100),
               "Black and Alpha: white turns transparent, darkness becomes opacity of black");
+    }
+
+    {
+        // line-art effects: ink coverage must follow the tone of the source
+        QImage src(320, 200, QImage::Format_ARGB32);
+        {
+            QPainter p(&src);
+            QLinearGradient g(0, 0, 320, 0);
+            g.setColorAt(0, Qt::white);
+            g.setColorAt(1, Qt::black);
+            p.fillRect(src.rect(), g);
+            QRadialGradient rg(QPointF(160, 100), 70);
+            rg.setColorAt(0, QColor(230, 160, 120));
+            rg.setColorAt(1, QColor(40, 30, 80, 0));
+            p.setBrush(rg);
+            p.setPen(Qt::NoPen);
+            p.drawEllipse(QPointF(160, 100), 70, 70);
+        }
+        auto meanLight = [](const QImage &img, int x0, int x1) {
+            double sum = 0;
+            int n = 0;
+            for (int y = 0; y < img.height(); ++y)
+                for (int x = x0; x < x1; ++x, ++n)
+                    sum += qGray(img.pixel(x, y));
+            return sum / n / 255.0;
+        };
+        for (const EffectDef &def : effectRegistry()) {
+            if (def.name != "Engraving" && def.name != "Halftone")
+                continue;
+            const QString modeKey = def.name == "Engraving" ? "ink" : "mode";
+            const int modes = def.name == "Engraving" ? 2 : 3;
+            for (int mode = 0; mode < modes; ++mode) {
+                QVariantMap p;
+                for (const EffectParam &ep : def.params)
+                    p[ep.key] = ep.def;
+                p[modeKey] = mode;
+                QImage dst = src.copy();
+                def.apply(src, dst, src.rect(), p);
+                const double light = meanLight(dst, 0, 40), dark = meanLight(dst, 280, 320);
+                char buf[160];
+                std::snprintf(buf, sizeof buf, "%s mode %d: light side %.2f, dark side %.2f", qPrintable(def.name), mode, light, dark);
+                CHECK(light > 0.8 && dark < 0.25, buf);
+                if (!g_shotDir.isEmpty())
+                    dst.save(g_shotDir + QString("/fx-%1-%2.png").arg(def.name).arg(mode));
+            }
+            if (def.name == "Halftone") {
+                QVariantMap p;
+                for (const EffectParam &ep : def.params)
+                    p[ep.key] = ep.def;
+                QImage dst = src.copy();
+                def.apply(src, dst, src.rect(), p);
+                double ink = 0;
+                for (int y = 0; y < 200; ++y)
+                    for (int x = 150; x < 170; ++x)
+                        ink += 1 - qGray(dst.pixel(x, y)) / 255.0;
+                double tone = 0;
+                for (int y = 0; y < 200; ++y)
+                    for (int x = 150; x < 170; ++x)
+                        tone += 1 - qGray(src.pixel(x, y)) / 255.0;
+                CHECK(std::abs(ink - tone) / (20 * 200) < 0.08, "Halftone: dot area matches the tone");
+            }
+        }
     }
 
     std::printf("[colour wheel modifiers]\n");
@@ -807,6 +906,7 @@ int main(int argc, char **argv)
         w.settings().shapeType = ShapeType::Filled;
         drag({-15, 30}, {15, 60});
         CHECK(near(px(2, 45), QColor(255, 0, 0)) && near(px(97, 45), QColor(255, 0, 0)), "shape across the left edge wraps");
+        key(Qt::Key_Return);                         // finish the live shape before editing the layer directly
         {
             // painting on the bottom row / right column must not leak onto row 0 / column 0
             QImage &img = td->activeImage();

@@ -276,7 +276,7 @@ private:
     QComboBox *m_fillCombo, *m_samplingCombo, *m_sampleLayerCombo, *m_afterPickCombo, *m_lineStyleCombo,
         *m_resampleCombo, *m_fontSizeCombo;
     class QFontComboBox *m_fontCombo;
-    class QSpinBox *m_radiusSpin;
+    QComboBox *m_sidesCombo, *m_radiusCombo;
     QAction *m_gradTypes[5];
     QAction *m_gradColor, *m_gradTransp, *m_bold, *m_italic, *m_underline, *m_strike, *m_align[3];
 

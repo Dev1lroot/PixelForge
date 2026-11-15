@@ -2338,17 +2338,92 @@ private:
 
 // ============================================================ shapes
 
-class ShapeTool : public Tool
+// corners of a regular polygon with a flat bottom edge, on the unit circle
+static QPolygonF unitPolygon(int sides)
+{
+    sides = std::clamp(sides, 3, 1000);
+    QPolygonF pts;
+    for (int i = 0; i < sides; ++i) {
+        const double a = M_PI / 2 + M_PI / sides + 2 * M_PI * i / sides;
+        pts << QPointF(std::cos(a), std::sin(a));
+    }
+    return pts;
+}
+
+// the polygon stretched to fill `r` (4 sides gives exactly the rectangle)
+static QPolygonF polygonInRect(const QRectF &r, int sides)
+{
+    QPolygonF pts = unitPolygon(sides);
+    const QRectF b = pts.boundingRect();
+    for (QPointF &p : pts)
+        p = QPointF(r.left() + (p.x() - b.left()) / b.width() * r.width(),
+                    r.top() + (p.y() - b.top()) / b.height() * r.height());
+    return pts;
+}
+
+// width / height of the unstretched polygon, for Shift-constrained drawing
+static double polygonAspect(int sides)
+{
+    const QRectF b = unitPolygon(sides).boundingRect();
+    return b.width() / b.height();
+}
+
+// closed path through `pts` with every corner rounded by a circular arc of `radius` px
+// (shrunk where the edges are too short to fit it)
+static QPainterPath roundedPolygon(const QPolygonF &pts, qreal radius)
+{
+    QPainterPath path;
+    const int n = pts.size();
+    if (n < 3)
+        return path;
+    if (radius <= 0) {
+        path.addPolygon(pts);
+        path.closeSubpath();
+        return path;
+    }
+    auto unit = [](QPointF v) { const qreal l = std::hypot(v.x(), v.y()); return l > 1e-9 ? v / l : QPointF(); };
+    for (int i = 0; i < n; ++i) {
+        const QPointF v = pts[i], prev = pts[(i + n - 1) % n], next = pts[(i + 1) % n];
+        const QPointF a = unit(prev - v), b = unit(next - v);
+        const qreal lenPrev = QLineF(v, prev).length(), lenNext = QLineF(v, next).length();
+        const qreal cosT = std::clamp(a.x() * b.x() + a.y() * b.y(), -1.0, 1.0);
+        const qreal theta = std::acos(cosT);                   // interior angle
+        QPointF p1 = v, p2 = v, c1 = v, c2 = v;
+        if (theta > 1e-3 && theta < M_PI - 1e-3) {
+            const qreal t = std::tan(theta / 2);
+            const qreal d = std::min({radius / t, lenPrev / 2, lenNext / 2});
+            const qreal rEff = d * t;
+            const qreal phi = M_PI - theta;                    // turn of the arc
+            const qreal h = 4.0 / 3.0 * std::tan(phi / 4) * rEff;
+            p1 = v + a * d;
+            p2 = v + b * d;
+            c1 = p1 - a * h;
+            c2 = p2 - b * h;
+        }
+        if (i == 0)
+            path.moveTo(p1);
+        else
+            path.lineTo(p1);
+        path.cubicTo(c1, c2, p2);
+    }
+    path.closeSubpath();
+    return path;
+}
+
+// Rectangle / Polygon / Ellipse / Freeform. After drawing, the shape stays live inside a transform box
+// (drag to move, handles to resize, right-drag to rotate) and follows tool option and colour changes,
+// until Enter, a click outside the box or another tool finishes it.
+class ShapeTool : public TransformToolBase
 {
 public:
-    enum Kind { Rect, Round, Ellipse, Free };
-    ShapeTool(MainWindow *m, Kind k) : Tool(m), m_kind(k) {}
+    enum Kind { Rect, Poly, Ellipse, Free };
+    ShapeTool(MainWindow *m, Kind k) : TransformToolBase(m), m_kind(k) {}
 
     ToolId id() const override
     {
         switch (m_kind) {
         case Rect: return ToolId::Rectangle;
-        case Round: return ToolId::RoundRect;
+        case Poly: return ToolId::Polygon;
         case Ellipse: return ToolId::Ellipse;
         default: return ToolId::Freeform;
         }
@@ -2357,7 +2432,7 @@ public:
     {
         switch (m_kind) {
         case Rect: return QObject::tr("Rectangle");
-        case Round: return QObject::tr("Rounded Rectangle");
+        case Poly: return QObject::tr("Polygon");
         case Ellipse: return QObject::tr("Ellipse");
         default: return QObject::tr("Freeform Shape");
         }
@@ -2366,7 +2441,7 @@ public:
     {
         switch (m_kind) {
         case Rect: return "rectangle";
-        case Round: return "roundrect";
+        case Poly: return "polygon";
         case Ellipse: return "ellipse";
         default: return "freeform";
         }
@@ -2377,102 +2452,238 @@ public:
         quint32 o = OptBrushWidth | OptShapeType | OptFill | OptAntialias | OptAlphaBlend;
         if (m_kind != Free)
             o |= OptLineStyle;
-        if (m_kind == Round)
-            o |= OptRadius;
+        if (m_kind == Poly)
+            o |= OptSides | OptRadius;
         return o;
     }
     QString helpText() const override
     {
+        const QString edit = QObject::tr(" Afterwards drag the box to move it, its handles to resize, right-drag to rotate; "
+                                         "Enter or a click outside finishes the shape.");
         if (m_kind == Free)
             return QObject::tr("Freeform Shape: Click and drag to draw the outline of a shape. "
-                               "Outline uses primary color, interior uses secondary color.");
+                               "Outline uses primary color, interior uses secondary color.") + edit;
         return QObject::tr("%1: Click and drag to draw a shape. Hold Shift to constrain proportions. "
-                           "Outline uses primary color, interior uses secondary color.").arg(name());
+                           "Outline uses primary color, interior uses secondary color.").arg(name()) + edit;
+    }
+    bool isEditing() const override { return m_editing || m_drawing; }
+
+    void activate() override
+    {
+        if (m_hooked)
+            return;
+        m_hooked = true;
+        auto rerender = [this] {
+            if (m_editing && !m_drawing && m_doc == doc() && main->currentTool() == this) {
+                render();
+                m_doc->replaceTopHistory();
+            }
+        };
+        connect(&settings(), &ToolSettings::changed, this, rerender);
+        connect(&colors(), &ColorState::changed, this, rerender);
     }
 
-    void mousePress(CanvasView *, const ToolEvent &e) override
+    void mousePress(CanvasView *v, const ToolEvent &e) override
     {
-        main->commitTool(this);
-        if (m_active)
+        if (m_drawing || m_dragging)
             return;
+        if (m_editing && m_doc == doc()) {
+            if (hitHandle(v, e.viewPos) >= 0 || insideBox(v, e.viewPos)) {
+                beginDrag(v, e);
+                return;
+            }
+        }
+        commit();
+        main->commitTool(this);
         m_doc = doc();
         m_backup = m_doc->activeImage();
         m_right = e.button == Qt::RightButton;
-        m_start = m_cur = e.pos;
+        m_a = m_b = e.pos;
         m_poly.clear();
         m_poly << e.pos;
-        m_active = true;
+        m_T = QTransform();
+        m_drawing = true;
         m_lastRect = QRect();
     }
 
-    void mouseMove(CanvasView *, const ToolEvent &e) override
+    void mouseMove(CanvasView *v, const ToolEvent &e) override
     {
-        if (!m_active || m_doc != doc())
+        if (m_dragging) {
+            if (m_doc == doc()) {
+                dragTo(e);
+                v->updateOverlay();
+            }
             return;
-        m_cur = e.pos;
+        }
+        if (!m_drawing) {
+            if (m_editing && m_doc == doc()) {
+                if (hitHandle(v, e.viewPos) < 0 && insideBox(v, e.viewPos))
+                    v->viewport()->setCursor(Qt::SizeAllCursor);
+                else
+                    hoverCursor(v, e);
+            }
+            return;
+        }
+        if (m_doc != doc())
+            return;
+        m_b = e.pos;
         if (m_kind != Free && (e.mods & Qt::ShiftModifier)) {
-            qreal s = std::max(std::fabs(m_cur.x() - m_start.x()), std::fabs(m_cur.y() - m_start.y()));
-            m_cur = QPointF(m_start.x() + (m_cur.x() >= m_start.x() ? s : -s),
-                            m_start.y() + (m_cur.y() >= m_start.y() ? s : -s));
+            const double aspect = m_kind == Poly ? polygonAspect(settings().polygonSides) : 1.0;
+            const double w = std::fabs(m_b.x() - m_a.x()), h = std::fabs(m_b.y() - m_a.y());
+            const double hh = std::max(h, w / aspect);
+            m_b = QPointF(m_a.x() + (m_b.x() >= m_a.x() ? 1 : -1) * hh * aspect,
+                          m_a.y() + (m_b.y() >= m_a.y() ? 1 : -1) * hh);
         }
         m_poly << e.pos;
         render();
-        QRectF r = QRectF(m_start, m_cur).normalized();
+        QRectF r = QRectF(m_a, m_b).normalized();
         setStatus(QObject::tr("%1: %2 x %3").arg(name()).arg(int(r.width())).arg(int(r.height())));
     }
 
-    void mouseRelease(CanvasView *, const ToolEvent &) override
+    void mouseRelease(CanvasView *v, const ToolEvent &) override
     {
-        if (!m_active || m_doc != doc())
+        if (m_dragging) {
+            m_dragging = false;
+            if (m_doc == doc())
+                m_doc->replaceTopHistory();
+            setStatus(helpText());
             return;
-        m_active = false;
-        if (QLineF(m_start, m_cur).length() < 1 && m_poly.size() < 3) {
+        }
+        if (!m_drawing || m_doc != doc())
+            return;
+        m_drawing = false;
+        if (QLineF(m_a, m_b).length() < 1 && m_poly.size() < 3) {
             m_doc->activeImage() = m_backup;
             m_doc->invalidate();
             m_backup = QImage();
             return;
         }
+        QRectF r = m_kind == Free ? m_poly.boundingRect() : QRectF(m_a, m_b).normalized();
+        // the box needs some extent for the resize handles to divide by
+        if (r.width() < 1)
+            r.adjust(-0.5, 0, 0.5, 0);
+        if (r.height() < 1)
+            r.adjust(0, -0.5, 0, 0.5);
+        if (m_kind != Free) {
+            m_a = r.topLeft();
+            m_b = r.bottomRight();
+        }
+        m_R = r;
+        m_T = QTransform();
+        m_editing = true;
         m_doc->pushHistory(name(), icon());
-        m_backup = QImage();
+        v->updateOverlay();
         setStatus(helpText());
+    }
+
+    bool keyPress(QKeyEvent *e) override
+    {
+        if (!m_editing || m_doc != doc())
+            return false;
+        QPointF d;
+        switch (e->key()) {
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+        case Qt::Key_Escape:
+            commit();
+            return true;
+        case Qt::Key_Left: d = QPointF(-1, 0); break;
+        case Qt::Key_Right: d = QPointF(1, 0); break;
+        case Qt::Key_Up: d = QPointF(0, -1); break;
+        case Qt::Key_Down: d = QPointF(0, 1); break;
+        default: return false;
+        }
+        m_T = m_T * QTransform::fromTranslate(d.x(), d.y());
+        render();
+        m_doc->replaceTopHistory();
+        view()->updateOverlay();
+        return true;
+    }
+
+    // finishing just drops the live box: the pixels are already in the layer and in history
+    void commit() override
+    {
+        const bool was = m_editing;
+        m_editing = m_drawing = m_dragging = false;
+        m_backup = QImage();
+        if (was && view())
+            view()->updateOverlay();
     }
 
     void reset() override
     {
-        m_active = false;
+        m_editing = m_drawing = m_dragging = false;
         m_backup = QImage();
     }
+    void prepareForHistory() override { reset(); }
+
+protected:
+    bool hasBox() const override { return m_editing && !m_drawing && m_doc == doc(); }
+    void applyTransform() override { render(); }
 
 private:
-    void render()
+    bool insideBox(CanvasView *v, const QPointF &viewPos) const
     {
-        QColor outline = m_right ? colors().secondary : colors().primary;
-        QColor interior = m_right ? colors().primary : colors().secondary;
-        ShapeType st = settings().shapeType;
-        if (st == ShapeType::Filled)
-            interior = outline;
+        if (!hasBox())
+            return false;
+        return viewQuad(v).containsPoint(viewPos, Qt::OddEvenFill);
+    }
+
+    // shape outline in image coordinates
+    QPainterPath geometry() const
+    {
         const qreal w = settings().brushWidth;
-        QRectF r = QRectF(m_start, m_cur).normalized();
         const bool aa = settings().antialias;
-        if (!aa || int(w) % 2 == 1) {
+        if (m_kind == Free) {
+            QPainterPath path;
+            path.addPolygon(m_drawing ? m_poly : m_T.map(m_poly));
+            path.closeSubpath();
+            return path;
+        }
+        QRectF r = m_drawing ? QRectF(m_a, m_b).normalized() : m_R;
+        // m_T = (axis-aligned scale in box space) * (rotation + translation): build the shape at its scaled size
+        // so strokes and corner radii stay exact, then place it rigidly
+        QTransform rigid;
+        if (!m_drawing && !m_T.isIdentity()) {
+            const qreal sx = std::hypot(m_T.m11(), m_T.m12());
+            const qreal ang = std::atan2(m_T.m12(), m_T.m11());
+            const qreal c = std::cos(ang), s = std::sin(ang);
+            const qreal sy = -m_T.m21() * s + m_T.m22() * c;      // negative: mirrored
+            r = QTransform::fromScale(sx, std::fabs(sy)).mapRect(r);
+            if (std::fabs(ang) < 1e-9 && sy > 0) {
+                r.translate(m_T.dx(), m_T.dy());
+            } else {
+                rigid = QTransform(c, s, -s, c, m_T.dx(), m_T.dy());
+                if (sy < 0)
+                    rigid = QTransform::fromScale(1, -1) * rigid;
+            }
+        }
+        if (rigid.isIdentity() && (!aa || int(w) % 2 == 1)) {
             r = QRectF(QPointF(std::floor(r.left()) + 0.5, std::floor(r.top()) + 0.5),
                        QPointF(std::floor(r.right()) + 0.5, std::floor(r.bottom()) + 0.5));
         }
         QPainterPath path;
         switch (m_kind) {
         case Rect: path.addRect(r); break;
-        case Round: {
-            qreal rad = std::min<qreal>(settings().radius, std::min(r.width(), r.height()) / 2);
-            path.addRoundedRect(r, rad, rad);
-            break;
-        }
+        case Poly: path = roundedPolygon(polygonInRect(r, settings().polygonSides), settings().radius); break;
         case Ellipse: path.addEllipse(r); break;
-        case Free:
-            path.addPolygon(m_poly);
-            path.closeSubpath();
-            break;
+        default: break;
         }
-        path = tiledPath(path, m_doc, settings());
+        return rigid.map(path);
+    }
+
+    void render()
+    {
+        if (m_doc != doc() || m_backup.isNull())
+            return;
+        QColor outline = m_right ? colors().secondary : colors().primary;
+        QColor interior = m_right ? colors().primary : colors().secondary;
+        ShapeType st = settings().shapeType;
+        if (st == ShapeType::Filled)
+            interior = outline;
+        const qreal w = settings().brushWidth;
+        const bool aa = settings().antialias;
+        const QPainterPath path = tiledPath(geometry(), m_doc, settings());
         QRect bounds = path.boundingRect().adjusted(-w - 2, -w - 2, w + 2, w + 2).toAlignedRect();
         const QRect tr = bounds.intersected(m_doc->rect());
         QImage temp = scratch(tr);
@@ -2488,8 +2699,11 @@ private:
                 p.setOpacity(1);
             }
             if (st != ShapeType::Filled) {
+                const bool sharp = m_kind == Rect || (m_kind == Poly && settings().radius <= 0);
                 QPen pen = dashPen(opaque(outline), w, m_kind == Free ? 0 : settings().lineStyle);
-                pen.setJoinStyle(m_kind == Rect ? Qt::MiterJoin : Qt::RoundJoin);
+                pen.setJoinStyle(sharp ? Qt::MiterJoin : Qt::RoundJoin);
+                if (sharp)
+                    pen.setMiterLimit(8);
                 if (m_kind == Rect && settings().lineStyle == 0)
                     pen.setCapStyle(Qt::SquareCap);
                 p.setPen(pen);
@@ -2515,9 +2729,9 @@ private:
     Kind m_kind;
     Document *m_doc = nullptr;
     QImage m_backup;
-    QPointF m_start, m_cur;
+    QPointF m_a, m_b;
     QPolygonF m_poly;
-    bool m_right = false, m_active = false;
+    bool m_right = false, m_drawing = false, m_editing = false;
     QRect m_lastRect;
 };
 
@@ -2545,7 +2759,7 @@ QVector<Tool *> createTools(MainWindow *m)
     t[int(ToolId::Text)] = new TextTool(m);
     t[int(ToolId::Line)] = new LineTool(m);
     t[int(ToolId::Rectangle)] = new ShapeTool(m, ShapeTool::Rect);
-    t[int(ToolId::RoundRect)] = new ShapeTool(m, ShapeTool::Round);
+    t[int(ToolId::Polygon)] = new ShapeTool(m, ShapeTool::Poly);
     t[int(ToolId::Ellipse)] = new ShapeTool(m, ShapeTool::Ellipse);
     t[int(ToolId::Freeform)] = new ShapeTool(m, ShapeTool::Free);
     for (Tool *tool : t)

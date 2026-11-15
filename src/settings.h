@@ -39,7 +39,8 @@ public:
     int textAlign = 0;                  // 0 left, 1 center, 2 right
     int lineStyle = 0;                  // index into dash style list
     int arrowStart = 0, arrowEnd = 0;
-    int radius = 20;
+    int radius = 0;                     // shape corner rounding, px
+    int polygonSides = 5;
     bool smoothResample = true;
     Units units = Units::Pixels;
     bool tileMode = false;              // tile view: paint wraps across canvas edges

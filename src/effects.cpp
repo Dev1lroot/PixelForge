@@ -6,6 +6,7 @@
 #include <cstring>
 
 #include <QPainter>
+#include <QtMath>
 #include <QMouseEvent>
 #include <QDialogButtonBox>
 #include <QFormLayout>
@@ -24,6 +25,7 @@
 #include <QDial>
 #include <QRandomGenerator>
 #include <thread>
+#include <mutex>
 #include <vector>
 #include <cmath>
 #include <algorithm>
@@ -1073,6 +1075,204 @@ static void fxFlipGreen(const QImage &s, QImage &d, const QRect &r, const QVaria
     perPixel(s, d, r, [](QRgb px, int, int) { return qRgba(qRed(px), 255 - qGreen(px), qBlue(px), qAlpha(px)); });
 }
 
+// ============================================================ engraving / halftone
+
+// lightness 0..1 of a premultiplied pixel laid over white paper
+static inline double paperLightness(QRgb pm)
+{
+    const double white = 255 - qAlpha(pm);
+    return ((qRed(pm) + white) * 0.299 + (qGreen(pm) + white) * 0.587 + (qBlue(pm) + white) * 0.114) / 255.0;
+}
+
+static inline double applyContrast(double v, int contrast)
+{
+    const double k = contrast >= 0 ? 1.0 + contrast / 25.0 : 1.0 + contrast / 100.0;
+    return std::clamp((v - 0.5) * k + 0.5, 0.0, 1.0);
+}
+
+// paper / ink compositing shared by the line-art effects: cov = ink coverage 0..1
+static inline QRgb inkOnPaper(double cov, QRgb srcPx, QRgb ink, int mode)
+{
+    const int a = qAlpha(srcPx);
+    if (mode == 2)      // ink only, transparent paper
+        return qRgba(qRed(ink), qGreen(ink), qBlue(ink), clamp255(cov * a));
+    auto mix = [cov](int paper, int in) { return clamp255(paper + (in - paper) * cov); };
+    return qRgba(mix(255, qRed(ink)), mix(255, qGreen(ink)), mix(255, qBlue(ink)), a);
+}
+
+// Banknote-style engraving: parallel wavy lines whose thickness follows the darkness of the image and
+// which bend with its tones, optionally cross-hatched in the shadows.
+static void fxEngraving(const QImage &s, QImage &d, const QRect &r, const QVariantMap &p)
+{
+    const double spacing = std::max(2.0, p["spacing"].toDouble());
+    const double ang = qDegreesToRadians(p["angle"].toDouble());
+    const double amp = p["amplitude"].toDouble();
+    const double wavelength = std::max(2.0, p["wavelength"].toDouble());
+    const double relief = p["relief"].toDouble() / 100.0;
+    const int contrast = p["contrast"].toInt();
+    const bool cross = p["cross"].toBool();
+    const int mode = p["ink"].toInt();          // 0 black on white, 1 coloured ink on white, 2 black on transparent
+
+    const QImage pm = toPremul(s);
+    const QImage tone = gaussianBlur(pm, std::max(0, p["smooth"].toInt()));
+    const QImage shape = gaussianBlur(pm, int(spacing * 1.5) + 1);       // broad tones that bend the lines
+    const double ca = std::cos(ang), sa = std::sin(ang);
+    const double ca2 = std::cos(ang + M_PI / 2.6), sa2 = std::sin(ang + M_PI / 2.6);
+    const double twoPi = 2 * M_PI;
+
+    // distance (px) from the nearest line centre of a set rotated by (c, sn)
+    auto lineDist = [&](double x, double y, double c, double sn, double bend) {
+        const double along = x * c + y * sn;
+        const double across = -x * sn + y * c + amp * std::sin(twoPi * along / wavelength) + bend;
+        const double t = across / spacing;
+        return std::fabs(t - std::floor(t) - 0.5) * spacing;
+    };
+
+    parallelRows(r.top(), r.bottom(), [&](int y) {
+        const QRgb *src = reinterpret_cast<const QRgb *>(s.constScanLine(y));
+        const QRgb *tl = reinterpret_cast<const QRgb *>(tone.constScanLine(y));
+        const QRgb *sl = reinterpret_cast<const QRgb *>(shape.constScanLine(y));
+        QRgb *o = reinterpret_cast<QRgb *>(const_cast<uchar *>(d.constScanLine(y)));
+        for (int x = r.left(); x <= r.right(); ++x) {
+            const double dark = 1.0 - applyContrast(paperLightness(tl[x]), contrast);
+            const double bend = relief * spacing * 2.0 * (paperLightness(sl[x]) - 0.5);
+            const double px = x + 0.5, py = y + 0.5;
+            // thickness grows with darkness; with cross-hatching the first set saturates later
+            const double w1 = cross ? std::min(1.0, dark * 1.25) : dark;
+            double cov = std::clamp(w1 * spacing / 2 - lineDist(px, py, ca, sa, bend) + 0.5, 0.0, 1.0);
+            if (cross && dark > 0.5) {
+                const double w2 = (dark - 0.5) / 0.5 * 0.85;
+                cov = std::max(cov, std::clamp(w2 * spacing / 2 - lineDist(px, py, ca2, sa2, -bend) + 0.5, 0.0, 1.0));
+            }
+            QRgb ink = qRgb(0, 0, 0);
+            if (mode == 1) {
+                const QRgb c = qUnpremultiply(tl[x]);
+                ink = qRgb(qRed(c) * 3 / 4, qGreen(c) * 3 / 4, qBlue(c) * 3 / 4);
+            }
+            o[x] = inkOnPaper(cov, src[x], ink, mode == 1 ? 0 : mode);
+        }
+    });
+}
+
+// radius (in cell units) of a dot whose footprint, clipped to its cell, covers `area` of the cell.
+// metric: 0 euclidean (round), 1 chebyshev (square), 2 manhattan (diamond)
+static const std::vector<double> &dotRadiusLut(int metric)
+{
+    static std::vector<double> luts[3];
+    static std::once_flag once[3];
+    std::call_once(once[metric], [metric] {
+        const int N = 96, steps = 400;
+        std::vector<double> dist(size_t(N) * N);
+        for (int j = 0; j < N; ++j)
+            for (int i = 0; i < N; ++i) {
+                const double dx = std::fabs((i + 0.5) / N - 0.5), dy = std::fabs((j + 0.5) / N - 0.5);
+                dist[size_t(j) * N + i] = metric == 0 ? std::hypot(dx, dy) : metric == 1 ? std::max(dx, dy) : dx + dy;
+            }
+        std::sort(dist.begin(), dist.end());
+        std::vector<double> &lut = luts[metric];
+        lut.resize(steps + 1);
+        for (int k = 0; k <= steps; ++k) {
+            const size_t idx = std::min(dist.size() - 1, size_t(double(k) / steps * dist.size()));
+            lut[k] = k == 0 ? 0.0 : dist[idx];
+        }
+    });
+    return luts[metric];
+}
+
+// ink coverage of a halftone screen at (x, y): tone(cx, cy) -> darkness 0..1 sampled at a cell centre
+template <typename Tone>
+static double halftoneCoverage(double x, double y, double cell, double c, double sn, int shape, Tone tone)
+{
+    const double gx = (x * c + y * sn) / cell, gy = (-x * sn + y * c) / cell;
+    const double ix = std::floor(gx), iy = std::floor(gy);
+    const double fx = gx - ix - 0.5, fy = gy - iy - 0.5;
+    if (shape == 3) {       // lines: one line per row of cells, width follows the tone along it
+        const double cxg = gx, cyg = iy + 0.5;
+        const double dark = tone(cxg * cell * c - cyg * cell * sn, cxg * cell * sn + cyg * cell * c);
+        return std::clamp((dark / 2 - std::fabs(fy)) * cell + 0.5, 0.0, 1.0);
+    }
+    const double cxg = ix + 0.5, cyg = iy + 0.5;
+    const double dark = tone(cxg * cell * c - cyg * cell * sn, cxg * cell * sn + cyg * cell * c);
+    if (dark <= 0.002)
+        return 0.0;
+    if (dark >= 0.998)
+        return 1.0;
+    const std::vector<double> &lut = dotRadiusLut(shape);
+    const double radius = lut[size_t(dark * (lut.size() - 1) + 0.5)];
+    const double ax = std::fabs(fx), ay = std::fabs(fy);
+    const double dist = shape == 0 ? std::hypot(ax, ay) : shape == 1 ? std::max(ax, ay) : (ax + ay) / M_SQRT2;
+    const double rad = shape == 2 ? radius / M_SQRT2 : radius;
+    return std::clamp((rad - dist) * cell + 0.5, 0.0, 1.0);
+}
+
+// Print-style halftone: the image becomes a screen of dots whose size follows the darkness of each cell.
+static void fxHalftone(const QImage &s, QImage &d, const QRect &r, const QVariantMap &p)
+{
+    const double cell = std::max(2.0, p["size"].toDouble());
+    const double ang = qDegreesToRadians(p["angle"].toDouble());
+    const int shape = p["shape"].toInt();
+    const int mode = p["mode"].toInt();         // 0 black on white, 1 coloured dots, 2 CMYK, 3 black on transparent
+    const int contrast = p["contrast"].toInt();
+    const QImage avg = boxBlur(toPremul(s), std::max(1, int(cell / 2)), 2);
+    auto at = [&](double x, double y) { return sampleBilinear(avg, x, y); };
+    auto darkness = [&](double x, double y) { return 1.0 - applyContrast(paperLightness(at(x, y)), contrast); };
+
+    if (mode == 2) {
+        // C, M, Y, K screens at the classic angles relative to the chosen one
+        const double offs[4] = {-30, 30, -45, 0};
+        double cs[4], sn[4];
+        for (int i = 0; i < 4; ++i) {
+            cs[i] = std::cos(ang + qDegreesToRadians(offs[i]));
+            sn[i] = std::sin(ang + qDegreesToRadians(offs[i]));
+        }
+        auto cmyk = [&](double x, double y, int ch) {
+            const QRgb pmPx = at(x, y);
+            const double white = 255 - qAlpha(pmPx);
+            const double rr = (qRed(pmPx) + white) / 255.0, gg = (qGreen(pmPx) + white) / 255.0, bb = (qBlue(pmPx) + white) / 255.0;
+            double cc = 1 - rr, mm = 1 - gg, yy = 1 - bb;
+            const double k = std::min({cc, mm, yy});
+            if (ch == 3)
+                return applyContrast(k, contrast);
+            const double v = k < 0.999 ? ((ch == 0 ? cc : ch == 1 ? mm : yy) - k) / (1 - k) : 0.0;
+            return applyContrast(v, contrast);
+        };
+        parallelRows(r.top(), r.bottom(), [&](int y) {
+            const QRgb *src = reinterpret_cast<const QRgb *>(s.constScanLine(y));
+            QRgb *o = reinterpret_cast<QRgb *>(const_cast<uchar *>(d.constScanLine(y)));
+            for (int x = r.left(); x <= r.right(); ++x) {
+                double cov[4];
+                for (int ch = 0; ch < 4; ++ch)
+                    cov[ch] = halftoneCoverage(x + 0.5, y + 0.5, cell, cs[ch], sn[ch], shape,
+                                               [&](double tx, double ty) { return cmyk(tx, ty, ch); });
+                const double k = 1 - cov[3];
+                o[x] = qRgba(clamp255(255 * (1 - cov[0]) * k), clamp255(255 * (1 - cov[1]) * k),
+                             clamp255(255 * (1 - cov[2]) * k), qAlpha(src[x]));
+            }
+        });
+        return;
+    }
+
+    const double c = std::cos(ang), sn = std::sin(ang);
+    parallelRows(r.top(), r.bottom(), [&](int y) {
+        const QRgb *src = reinterpret_cast<const QRgb *>(s.constScanLine(y));
+        QRgb *o = reinterpret_cast<QRgb *>(const_cast<uchar *>(d.constScanLine(y)));
+        for (int x = r.left(); x <= r.right(); ++x) {
+            const double cov = halftoneCoverage(x + 0.5, y + 0.5, cell, c, sn, shape, darkness);
+            QRgb ink = qRgb(0, 0, 0);
+            if (mode == 1) {
+                // dots in a richer, deeper version of the cell's colour: the dot size carries the lightness
+                const QRgb col = qUnpremultiply(at(x + 0.5, y + 0.5));
+                QColor hc = QColor::fromRgb(col);
+                float h, sat, v;
+                hc.getHsvF(&h, &sat, &v);
+                hc.setHsvF(std::max(0.0f, h), std::min(1.0f, sat * 1.25f), v * 0.85f);
+                ink = hc.rgb();
+            }
+            o[x] = inkOnPaper(cov, src[x], ink, mode == 3 ? 2 : 0);
+        }
+    });
+}
+
 // ============================================================ registry
 
 const QVector<EffectDef> &effectRegistry()
@@ -1117,6 +1317,17 @@ const QVector<EffectDef> &effectRegistry()
     adj(QO::tr("Sepia"), "sepia", QKeySequence("Ctrl+Shift+E"), {}, fxSepia);
 
     fx("Artistic", QO::tr("Ink Sketch"), {P("ink", QO::tr("Ink outline"), 0, 99, 50), P("coloring", QO::tr("Coloring"), 0, 100, 50)}, fxInkSketch);
+    fx("Artistic", QO::tr("Engraving"), {P("spacing", QO::tr("Line spacing"), 2, 60, 6), P("angle", QO::tr("Angle"), -180, 180, 30, EffectParam::Angle),
+                                         P("amplitude", QO::tr("Wave amplitude"), 0, 50, 2), P("wavelength", QO::tr("Wavelength"), 4, 1000, 90),
+                                         P("relief", QO::tr("Relief (lines follow tones)"), 0, 100, 50), P("contrast", QO::tr("Contrast"), -100, 100, 15),
+                                         P("smooth", QO::tr("Smoothing"), 0, 20, 1), B("cross", QO::tr("Cross-hatch shadows"), true),
+                                         C("ink", QO::tr("Ink"), {QO::tr("Black on white"), QO::tr("Colored ink"), QO::tr("Black on transparent")})},
+       fxEngraving);
+    fx("Artistic", QO::tr("Halftone"), {P("size", QO::tr("Dot cell size"), 2, 100, 8), P("angle", QO::tr("Screen angle"), -180, 180, 45, EffectParam::Angle),
+                                        C("shape", QO::tr("Dot shape"), {QO::tr("Round"), QO::tr("Square"), QO::tr("Diamond"), QO::tr("Lines")}),
+                                        C("mode", QO::tr("Colors"), {QO::tr("Black on white"), QO::tr("Colored dots"), QO::tr("CMYK print"),
+                                                                     QO::tr("Black on transparent")}),
+                                        P("contrast", QO::tr("Contrast"), -100, 100, 0)}, fxHalftone);
     fx("Artistic", QO::tr("Oil Painting"), {P("brush", QO::tr("Brush size"), 1, 8, 3), P("coarseness", QO::tr("Coarseness"), 3, 255, 50)}, fxOilPainting);
     fx("Artistic", QO::tr("Pencil Sketch"), {P("tip", QO::tr("Pencil tip size"), 1, 20, 2), P("range", QO::tr("Color range"), -20, 20, 0)}, fxPencilSketch);
 

@@ -20,7 +20,7 @@ class QKeyEvent;
 enum class ToolId {
     RectSelect, Move, Lasso, MoveSelection, EllipseSelect, Zoom, MagicWand, Pan,
     Bucket, Gradient, Brush, Eraser, Pencil, ColorPicker, CloneStamp, Recolor,
-    Text, Line, Rectangle, RoundRect, Ellipse, Freeform, Count
+    Text, Line, Rectangle, Polygon, Ellipse, Freeform, Count
 };
 
 enum ToolOption : quint32 {
@@ -36,7 +36,8 @@ enum ToolOption : quint32 {
     OptSampling = 1 << 9,
     OptFont = 1 << 10,
     OptLineStyle = 1 << 11,
-    OptRadius = 1 << 12,
+    OptRadius = 1 << 12,            // corner rounding
+    OptSides = 1 << 15,
     OptResample = 1 << 13,
     OptHardness = 1 << 14,
 };
